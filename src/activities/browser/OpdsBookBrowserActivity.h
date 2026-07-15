@@ -50,6 +50,11 @@ class OpdsBookBrowserActivity final : public Activity {
   };
   bool coversEnabled = false;
   std::vector<CoverState> coverStates;
+  // Per-entry "already on the SD card" flag (parallel to `entries`), computed once
+  // per page from the deterministic download path. Books present locally get a
+  // downloaded checkmark (a cover-corner chip in rich mode, a gutter check in the
+  // text list).
+  std::vector<uint8_t> downloadedFlags;
   // Timestamp of the last user interaction while browsing. Cover fetch/decode
   // (which can block on network/SD) is deferred until input has been idle for a
   // short window, so scrolling stays responsive and covers fill in once you pause.
@@ -70,6 +75,9 @@ class OpdsBookBrowserActivity final : public Activity {
   void navigateToEntry(const OpdsEntry& entry);
   void navigateBack();
   void downloadBook(const OpdsEntry& book);
+  std::string localFilename(const OpdsEntry& book) const;         // SD path the downloader writes to
+  void drawCheck(int x, int y, int size, bool state);             // Bare checkmark (two strokes) within a size box
+  void drawDownloadedBadge(int x, int y, int size, bool invert);  // Chip + check for the cover corner
   void launchSearch();
   void performSearch(const std::string& query);
   bool preventAutoSleep() override { return true; }

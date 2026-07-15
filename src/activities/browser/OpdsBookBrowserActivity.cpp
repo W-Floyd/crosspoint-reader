@@ -102,6 +102,7 @@ void OpdsBookBrowserActivity::onEnter() {
   state = BrowserState::CHECK_WIFI;
   entries.clear();
   coverStates.clear();
+  downloadedFlags.clear();
   navigationHistory.clear();
   searchTemplate = "";
   currentPath = "";
@@ -125,6 +126,7 @@ void OpdsBookBrowserActivity::onExit() {
   Activity::onExit();
   entries.clear();
   coverStates.clear();
+  downloadedFlags.clear();
   navigationHistory.clear();
 
   if (WiFi.getMode() != WIFI_MODE_NULL) {
@@ -306,9 +308,14 @@ void OpdsBookBrowserActivity::renderTextList() {
     const auto& entry = entries[i];
     std::string displayText = (entry.type == OpdsEntryType::NAVIGATION) ? "> " + entry.title : entry.title;
     if (entry.type == OpdsEntryType::BOOK && !entry.author.empty()) displayText += " - " + entry.author;
+    const int rowTop = TEXT_LIST_TOP + (i % TEXT_PAGE_ITEMS) * TEXT_ROW_HEIGHT;
+    const bool foreground = i != static_cast<size_t>(selectorIndex);
     auto item = renderer.truncatedText(UI_10_FONT_ID, displayText.c_str(), pageWidth - 40);
-    renderer.drawText(UI_10_FONT_ID, 20, TEXT_LIST_TOP + (i % TEXT_PAGE_ITEMS) * TEXT_ROW_HEIGHT, item.c_str(),
-                      i != static_cast<size_t>(selectorIndex));
+    renderer.drawText(UI_10_FONT_ID, 20, rowTop, item.c_str(), foreground);
+    // Downloaded books get a checkmark in the left gutter (no cover here).
+    if (entry.type == OpdsEntryType::BOOK && i < downloadedFlags.size() && downloadedFlags[i]) {
+      drawCheck(3, rowTop + 5, 14, foreground);
+    }
   }
 }
 
@@ -376,6 +383,13 @@ void OpdsBookBrowserActivity::renderRichRow(int entryIndex, int rowY, int rowHei
     // drawText's y is the line-box top; center the single line within the box.
     const int glyphTop = thumbY + (thumbH - renderer.getLineHeight(UI_12_FONT_ID)) / 2;
     renderer.drawText(UI_12_FONT_ID, glyphX, glyphTop, glyph, !invert);
+  }
+
+  // "Already on the SD card" badge in the thumbnail's top-right corner.
+  if (entry.type == OpdsEntryType::BOOK && entryIndex < static_cast<int>(downloadedFlags.size()) &&
+      downloadedFlags[entryIndex]) {
+    constexpr int badge = 16;
+    drawDownloadedBadge(thumbX + thumbW - badge - 1, thumbY + 1, badge, invert);
   }
 
   // Metadata column. Lines are stacked top-down; `lineTop` is the line-box top
@@ -475,6 +489,13 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
   // load as an interaction so covers only start after the page has had a moment
   // to render (and don't stall a rapid drill-down through folders).
   coverStates.assign(entries.size(), CoverState::Unknown);
+  // Flag entries already present on the SD card (one stat each, once per page).
+  downloadedFlags.assign(entries.size(), 0);
+  for (size_t i = 0; i < entries.size(); i++) {
+    if (entries[i].type == OpdsEntryType::BOOK) {
+      downloadedFlags[i] = Storage.exists(localFilename(entries[i]).c_str()) ? 1 : 0;
+    }
+  }
   lastInteractionMs = millis();
   nextCoverRetryMs = 0;
   coverRetryRounds = 0;
@@ -489,6 +510,7 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
 void OpdsBookBrowserActivity::releaseEntries() {
   std::vector<OpdsEntry>().swap(entries);
   std::vector<CoverState>().swap(coverStates);
+  std::vector<uint8_t>().swap(downloadedFlags);
 }
 
 void OpdsBookBrowserActivity::navigateToEntry(const OpdsEntry& entry) {
@@ -520,6 +542,27 @@ void OpdsBookBrowserActivity::navigateBack() {
   }
 }
 
+std::string OpdsBookBrowserActivity::localFilename(const OpdsEntry& book) const {
+  return "/" + StringUtils::sanitizeFilename((book.author.empty() ? "" : book.author + " - ") + book.title) + ".epub";
+}
+
+void OpdsBookBrowserActivity::drawCheck(int x, int y, int size, bool state) {
+  // Checkmark filling most of the size box: mid-left, down to the corner, up to
+  // the top-right.
+  const int x0 = x + size * 15 / 100, y0 = y + size * 55 / 100;
+  const int x1 = x + size * 40 / 100, y1 = y + size * 80 / 100;
+  const int x2 = x + size * 85 / 100, y2 = y + size * 20 / 100;
+  renderer.drawLine(x0, y0, x1, y1, 2, state);
+  renderer.drawLine(x1, y1, x2, y2, 2, state);
+}
+
+void OpdsBookBrowserActivity::drawDownloadedBadge(int x, int y, int size, bool invert) {
+  // Filled chip with a checkmark in the top-right of the thumbnail. Colours
+  // contrast with the row background (chip = foreground colour, check = bg).
+  renderer.fillRoundedRect(x, y, size, size, 3, invert ? Color::White : Color::Black);
+  drawCheck(x, y, size, invert);  // check drawn in the row's background colour
+}
+
 void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& book) {
   state = BrowserState::DOWNLOADING;
   statusMessage = book.title;
@@ -529,8 +572,7 @@ void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& book) {
   // Build full download URL relative to the current feed, not the root server URL
   const std::string feedUrl = UrlUtils::buildUrl(server.url, currentPath);
   std::string downloadUrl = UrlUtils::buildUrl(feedUrl, book.href);
-  std::string filename =
-      "/" + StringUtils::sanitizeFilename((book.author.empty() ? "" : book.author + " - ") + book.title) + ".epub";
+  std::string filename = localFilename(book);
   LOG_DBG("OPDS", "Downloading: %s -> %s", downloadUrl.c_str(), filename.c_str());
 
   int lastRenderedPercent = -1;
@@ -554,6 +596,11 @@ void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& book) {
 
   if (result == HttpDownloader::OK) {
     clearBookCache(filename);
+    // Reflect the new local copy so the row shows the downloaded badge.
+    if (selectorIndex >= 0 && static_cast<size_t>(selectorIndex) < downloadedFlags.size()) {
+      downloadedFlags[selectorIndex] = 1;
+      richListPainted = false;  // force a full repaint so the badge appears
+    }
     state = BrowserState::BROWSING;
   } else {
     LOG_ERR("OPDS", "Download failed: %d", static_cast<int>(result));
