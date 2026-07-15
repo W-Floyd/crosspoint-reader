@@ -4,6 +4,7 @@
 #include <Bitmap.h>
 #include <CrossPointSettings.h>
 #include <GfxRenderer.h>
+#include <HalStorage.h>
 #include <I18n.h>
 #include <Logging.h>
 #include <OpdsStream.h>
@@ -22,6 +23,7 @@
 #include "network/HttpDownloader.h"
 #include "network/OpdsCoverCache.h"
 #include "util/BookCacheUtils.h"
+#include "util/OpdsFilename.h"
 #include "util/StringUtils.h"
 #include "util/UrlUtils.h"
 
@@ -553,7 +555,16 @@ void OpdsBookBrowserActivity::navigateBack() {
 }
 
 std::string OpdsBookBrowserActivity::localFilename(const OpdsEntry& book) const {
-  return "/" + StringUtils::sanitizeFilename((book.author.empty() ? "" : book.author + " - ") + book.title) + ".epub";
+  // Mirror downloadBook()'s target path: configured folder ("" => SD root) plus
+  // the configured filename format, so the "already downloaded" badge agrees
+  // with where a download actually lands.
+  const char* folder = SETTINGS.opdsDownloadFolder;
+  std::string path;
+  path.reserve(96);
+  if (folder[0] != '\0') path += folder;
+  path += '/';
+  path += opdsBookFilename(book.author, book.title, static_cast<OpdsFilenameFormat>(SETTINGS.opdsFilenameFormat));
+  return path;
 }
 
 void OpdsBookBrowserActivity::drawCheck(int x, int y, int size, bool state) {
@@ -582,7 +593,24 @@ void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& book) {
   // Build full download URL relative to the current feed, not the root server URL
   const std::string feedUrl = UrlUtils::buildUrl(server.url, currentPath);
   std::string downloadUrl = UrlUtils::buildUrl(feedUrl, book.href);
-  std::string filename = localFilename(book);
+  // Ensure the configured download folder exists; fall back to SD root on
+  // failure so the download is never lost. exists()-guard first: mkdir's
+  // return-on-existing is unconfirmed, and every existing caller checks
+  // exists() before mkdir.
+  const char* folder = SETTINGS.opdsDownloadFolder;  // "" => SD root
+  bool haveFolder = folder[0] != '\0';
+  if (haveFolder && !Storage.exists(folder) && !Storage.mkdir(folder)) {
+    LOG_ERR("OPDS", "mkdir failed for %s, using SD root", folder);
+    haveFolder = false;
+  }
+
+  // Normal path is localFilename() (folder + configured filename format) so the
+  // "already downloaded" badge check agrees with where the file lands. On mkdir
+  // failure, fall back to SD root so the download isn't lost.
+  const std::string filename =
+      haveFolder ? localFilename(book)
+                 : "/" + opdsBookFilename(book.author, book.title,
+                                          static_cast<OpdsFilenameFormat>(SETTINGS.opdsFilenameFormat));
   LOG_DBG("OPDS", "Downloading: %s -> %s", downloadUrl.c_str(), filename.c_str());
 
   int lastRenderedPercent = -1;
