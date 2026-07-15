@@ -40,7 +40,9 @@ const char* kRichFeed = R"FEED(<?xml version="1.0" encoding="UTF-8"?>
     <title>The Great Book</title>
     <id>urn:uuid:book-1</id>
     <author><name>Jane Author</name></author>
-    <summary>A sweeping tale of adventure and memory.</summary>
+    <published>2019-05-01T00:00:00Z</published>
+    <category term="fantasy-adv" label="Fantasy"/>
+    <category term="second" label="Second Tag"/>
     <schema:Series schema:name="The Great Saga" schema:position="2"/>
     <link rel="http://opds-spec.org/image/thumbnail"
           href="/api/v1/opds/9/cover?ts=1&amp;preset=X3" type="image/jpeg"/>
@@ -94,20 +96,21 @@ TEST(OpdsParserRich, FallsBackToImageWhenNoThumbnail) {
   EXPECT_EQ(book->thumbnailUrl, "http://example.com/full.jpg");
 }
 
-TEST(OpdsParserRich, ExtractsSummary) {
+TEST(OpdsParserRich, ExtractsPublishedDate) {
   OpdsParser parser;
   parseFeed(parser, kRichFeed);
   const OpdsEntry* book = findByTitle(parser, "The Great Book");
   ASSERT_NE(book, nullptr);
-  EXPECT_EQ(book->summary, "A sweeping tale of adventure and memory.");
+  EXPECT_EQ(book->published, "2019-05-01T00:00:00Z");
 }
 
-TEST(OpdsParserRich, FallsBackToContentForSummary) {
+TEST(OpdsParserRich, ExtractsFirstCategoryLabel) {
   OpdsParser parser;
   parseFeed(parser, kRichFeed);
-  const OpdsEntry* book = findByTitle(parser, "Image Only");
+  const OpdsEntry* book = findByTitle(parser, "The Great Book");
   ASSERT_NE(book, nullptr);
-  EXPECT_EQ(book->summary, "Content used when no summary is present.");
+  // First category wins; prefer label over term.
+  EXPECT_EQ(book->category, "Fantasy");
 }
 
 TEST(OpdsParserRich, ExtractsSeriesFromAttribute) {
@@ -149,7 +152,8 @@ TEST(OpdsParserRich, StreamingChunkedWriteMatchesWhole) {
   ASSERT_NE(a, nullptr);
   ASSERT_NE(b, nullptr);
   EXPECT_EQ(a->thumbnailUrl, b->thumbnailUrl);
-  EXPECT_EQ(a->summary, b->summary);
+  EXPECT_EQ(a->published, b->published);
+  EXPECT_EQ(a->category, b->category);
   EXPECT_EQ(a->series, b->series);
   EXPECT_EQ(a->fileSizeBytes, b->fileSizeBytes);
 }
@@ -172,21 +176,21 @@ TEST(OpdsParserRich, SeriesFromElementText) {
   EXPECT_EQ(book->series, "Textual Series");
 }
 
-TEST(OpdsParserRich, SummaryTruncatedToBound) {
-  std::string longText(500, 'x');
+TEST(OpdsParserRich, CategoryTruncatedToBound) {
+  std::string longLabel(200, 'x');
   std::string feed =
       "<?xml version=\"1.0\"?><feed xmlns=\"http://www.w3.org/2005/Atom\"><entry>"
-      "<title>Long</title><id>x</id><summary>" +
-      longText +
-      "</summary>"
+      "<title>Long</title><id>x</id><category label=\"" +
+      longLabel +
+      "\"/>"
       "<link rel=\"http://opds-spec.org/acquisition\" href=\"/b.epub\" type=\"application/epub+zip\"/>"
       "</entry></feed>";
   OpdsParser parser;
   parseFeed(parser, feed);
   const OpdsEntry* book = findByTitle(parser, "Long");
   ASSERT_NE(book, nullptr);
-  EXPECT_LE(book->summary.size(), 96u);
-  EXPECT_GT(book->summary.size(), 0u);
+  EXPECT_LE(book->category.size(), 48u);
+  EXPECT_GT(book->category.size(), 0u);
 }
 
 }  // namespace

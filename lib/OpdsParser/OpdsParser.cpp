@@ -13,12 +13,9 @@ constexpr size_t MAX_ID_CHARS = 128;
 constexpr size_t MAX_HREF_CHARS = 768;
 constexpr size_t MAX_SEARCH_TEMPLATE_CHARS = 768;
 constexpr size_t MAX_PAGE_URL_CHARS = 768;
-// The browser only ever shows a single truncated line of summary (~50 chars), so
-// a tight cap keeps a full page of entries small in RAM — headroom that matters
-// because covers decode with WiFi up and free heap is already near the JPEG
-// decoder's floor. Do not raise without re-checking on-device heap.
-constexpr size_t MAX_SUMMARY_CHARS = 96;
 constexpr size_t MAX_SERIES_CHARS = 120;
+constexpr size_t MAX_CATEGORY_CHARS = 48;
+constexpr size_t MAX_PUBLISHED_CHARS = 24;  // ISO 8601 date; only the year is shown
 constexpr size_t MAX_MEDIA_TYPE_CHARS = 64;
 }  // namespace
 
@@ -90,7 +87,7 @@ void OpdsParser::clear() {
   currentEntry = OpdsEntry{};
   currentText.clear();
   inEntry = inTitle = inAuthor = inAuthorName = inId = false;
-  inSummary = inContent = inSeries = inSeriesName = false;
+  inPublished = inSeries = inSeriesName = false;
   currentThumbIsThumbnail = false;
   collectCurrentEntry = false;
   feedTruncated = false;
@@ -135,7 +132,7 @@ void XMLCALL OpdsParser::startElement(void* userData, const XML_Char* name, cons
     self->currentEntry = OpdsEntry{};
     self->currentText.clear();
     self->inTitle = self->inAuthor = self->inAuthorName = self->inId = false;
-    self->inSummary = self->inContent = self->inSeries = self->inSeriesName = false;
+    self->inPublished = self->inSeries = self->inSeriesName = false;
     self->currentThumbIsThumbnail = false;
     return;
   }
@@ -206,12 +203,18 @@ void XMLCALL OpdsParser::startElement(void* userData, const XML_Char* name, cons
   } else if (strcmp(name, "id") == 0 || strstr(name, ":id") != nullptr) {
     self->inId = true;
     self->currentText.clear();
-  } else if (strcmp(name, "summary") == 0 || strstr(name, ":summary") != nullptr) {
-    self->inSummary = true;
+  } else if (strcmp(name, "published") == 0 || strstr(name, ":published") != nullptr || strcmp(name, "issued") == 0 ||
+             strstr(name, ":issued") != nullptr) {
+    // Atom <published> or dcterms:issued — publication date (year is shown).
+    self->inPublished = true;
     self->currentText.clear();
-  } else if (strcmp(name, "content") == 0 || strstr(name, ":content") != nullptr) {
-    self->inContent = true;
-    self->currentText.clear();
+  } else if (strcmp(name, "category") == 0 || strstr(name, ":category") != nullptr) {
+    // Atom <category term=".." label=".."/> — keep the first one's label (or term).
+    if (self->currentEntry.category.empty()) {
+      const char* label = findAttribute(atts, "label");
+      if (!label) label = findAttribute(atts, "term");
+      if (label) assignBounded(self->currentEntry.category, label, MAX_CATEGORY_CHARS);
+    }
   } else if (strcmp(name, "Series") == 0 || strstr(name, ":Series") != nullptr) {
     // schema:Series is usually an empty element carrying the name as an attribute
     // (schema:name / name); some feeds put it in the element text instead.
@@ -250,13 +253,10 @@ void XMLCALL OpdsParser::endElement(void* userData, const XML_Char* name) {
     } else if (strcmp(name, "id") == 0 || strstr(name, ":id") != nullptr) {
       if (self->inId) self->currentEntry.id = self->currentText;
       self->inId = false;
-    } else if (strcmp(name, "summary") == 0 || strstr(name, ":summary") != nullptr) {
-      if (self->inSummary) self->currentEntry.summary = self->currentText;
-      self->inSummary = false;
-    } else if (strcmp(name, "content") == 0 || strstr(name, ":content") != nullptr) {
-      // Only fall back to <content> when no <summary> was provided.
-      if (self->inContent && self->currentEntry.summary.empty()) self->currentEntry.summary = self->currentText;
-      self->inContent = false;
+    } else if (self->inPublished && (strcmp(name, "published") == 0 || strstr(name, ":published") != nullptr ||
+                                     strcmp(name, "issued") == 0 || strstr(name, ":issued") != nullptr)) {
+      if (self->currentEntry.published.empty()) self->currentEntry.published = self->currentText;
+      self->inPublished = false;
     } else if (strcmp(name, "Series") == 0 || strstr(name, ":Series") != nullptr) {
       if (self->currentEntry.series.empty() && !self->currentText.empty())
         self->currentEntry.series = self->currentText;
@@ -276,7 +276,7 @@ void XMLCALL OpdsParser::characterData(void* userData, const XML_Char* s, const 
     appendBounded(self->currentText, s, len, MAX_SERIES_CHARS);
   } else if (self->inId) {
     appendBounded(self->currentText, s, len, MAX_ID_CHARS);
-  } else if (self->inSummary || self->inContent) {
-    appendBounded(self->currentText, s, len, MAX_SUMMARY_CHARS);
+  } else if (self->inPublished) {
+    appendBounded(self->currentText, s, len, MAX_PUBLISHED_CHARS);
   }
 }

@@ -31,7 +31,8 @@ struct OpdsEntry {
                                // stored verbatim (query string intact, e.g. &preset=...),
                                // resolved to an absolute URL by the consumer.
   std::string series;          // Series/collection name, if advertised
-  std::string summary;         // Short description, truncated at parse time
+  std::string category;        // First category/genre label, if advertised
+  std::string published;       // Publication date (ISO 8601), if advertised
   std::string mediaType;       // Acquisition link MIME type (e.g. application/epub+zip)
   uint64_t fileSizeBytes = 0;  // Acquisition link `length`, 0 if unknown
 };
@@ -128,8 +129,7 @@ class OpdsParser final : public Print {
   bool inAuthor = false;
   bool inAuthorName = false;
   bool inId = false;
-  bool inSummary = false;
-  bool inContent = false;
+  bool inPublished = false;
   bool inSeries = false;
   bool inSeriesName = false;
   bool currentThumbIsThumbnail = false;  // Prefer an explicit thumbnail link over a full-size image

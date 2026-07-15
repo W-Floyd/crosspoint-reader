@@ -64,12 +64,34 @@ constexpr size_t COVER_MODE_MAX_ENTRIES = 38;
 constexpr unsigned long COVER_RETRY_INTERVAL_MS = 1500;
 constexpr int MAX_COVER_RETRY_ROUNDS = 6;
 
-// Short format label from an acquisition MIME type, e.g. "EPUB".
+// Short format label from an acquisition MIME type, e.g. "EPUB". Empty if unknown.
 std::string formatLabel(const std::string& mediaType) {
   if (mediaType.find("epub") != std::string::npos) return "EPUB";
   if (mediaType.find("pdf") != std::string::npos) return "PDF";
-  if (mediaType.empty()) return "";
   return "";
+}
+
+// Human-readable file size, e.g. "1.2 MB". Empty when size is unknown.
+std::string formatSize(uint64_t bytes) {
+  if (bytes == 0) return "";
+  char buf[24];
+  if (bytes >= 1024ULL * 1024ULL) {
+    snprintf(buf, sizeof(buf), "%.1f MB", static_cast<double>(bytes) / (1024.0 * 1024.0));
+  } else if (bytes >= 1024ULL) {
+    snprintf(buf, sizeof(buf), "%.0f KB", static_cast<double>(bytes) / 1024.0);
+  } else {
+    snprintf(buf, sizeof(buf), "%llu B", static_cast<unsigned long long>(bytes));
+  }
+  return buf;
+}
+
+// Leading 4-digit year from an ISO 8601 publication date; empty if not a year.
+std::string yearOf(const std::string& published) {
+  if (published.size() < 4) return "";
+  for (int i = 0; i < 4; i++) {
+    if (published[i] < '0' || published[i] > '9') return "";
+  }
+  return published.substr(0, 4);
 }
 }  // namespace
 
@@ -369,42 +391,33 @@ void OpdsBookBrowserActivity::renderRichRow(int entryIndex, int rowY, int rowHei
   renderer.drawText(UI_12_FONT_ID, textX, lineTop, title.c_str(), !invert, EpdFontFamily::BOLD);
   lineTop += titleLineH;
 
-  // Format tag + author / series line. The format leads as a faded-italic "(EPUB)"
-  // tag so it shares this line instead of wasting one of its own.
-  int cursorX = textX;
-  const std::string fmt = (entry.type == OpdsEntryType::BOOK) ? formatLabel(entry.mediaType) : std::string{};
-  if (!fmt.empty()) {
-    const std::string tag = "(" + fmt + ")";
-    renderer.drawText(UI_10_FONT_ID, cursorX, lineTop, tag.c_str(), !invert, EpdFontFamily::ITALIC);
-    const int tagW = renderer.getTextWidth(UI_10_FONT_ID, tag.c_str(), EpdFontFamily::ITALIC);
-    // Fade to secondary: checkerboard the tag with the row's background colour
-    // (same gray-text trick the theme list uses for dimmed rows).
-    const int lineH = renderer.getLineHeight(UI_10_FONT_ID);
-    for (int py = lineTop; py < lineTop + lineH; py++) {
-      for (int px = cursorX; px < cursorX + tagW; px++) {
-        if ((px + py) % 2 == 0) renderer.drawPixel(px, py, invert);
-      }
-    }
-    cursorX += tagW + renderer.getSpaceWidth(UI_10_FONT_ID);
-  }
-
+  // Author / series line.
   std::string authorLine = entry.author;
   if (!entry.series.empty()) {
     if (!authorLine.empty()) authorLine += " \xE2\x80\xA2 ";  // bullet
     authorLine += entry.series;
   }
   if (!authorLine.empty()) {
-    const int avail = textX + textW - cursorX;
-    auto line = renderer.truncatedText(UI_10_FONT_ID, authorLine.c_str(), avail);
-    renderer.drawText(UI_10_FONT_ID, cursorX, lineTop, line.c_str(), !invert);
+    auto line = renderer.truncatedText(UI_10_FONT_ID, authorLine.c_str(), textW);
+    renderer.drawText(UI_10_FONT_ID, textX, lineTop, line.c_str(), !invert);
   }
   lineTop += metaLineH;
 
-  // Summary snippet (single line).
-  if (!entry.summary.empty()) {
-    auto snippet = renderer.truncatedText(UI_10_FONT_ID, entry.summary.c_str(), textW);
-    renderer.drawText(UI_10_FONT_ID, textX, lineTop, snippet.c_str(), !invert);
-    lineTop += metaLineH;
+  // Facts line — format, size, year, and genre, as the feed provides them. Joined
+  // with bullets; only non-empty parts appear, so sparse feeds simply show less.
+  std::string facts;
+  const auto addFact = [&facts](const std::string& part) {
+    if (part.empty()) return;
+    if (!facts.empty()) facts += " \xE2\x80\xA2 ";  // bullet
+    facts += part;
+  };
+  if (entry.type == OpdsEntryType::BOOK) addFact(formatLabel(entry.mediaType));
+  addFact(formatSize(entry.fileSizeBytes));
+  addFact(yearOf(entry.published));
+  addFact(entry.category);
+  if (!facts.empty()) {
+    auto line = renderer.truncatedText(UI_10_FONT_ID, facts.c_str(), textW);
+    renderer.drawText(UI_10_FONT_ID, textX, lineTop, line.c_str(), !invert);
   }
 }
 
