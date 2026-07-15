@@ -267,17 +267,21 @@ void OpdsBookBrowserActivity::render(RenderLock&&) {
   // clearing and re-blitting every visible cover, repaint only the two rows whose
   // highlight changed — the old row loses its grey fill, the new one gains it.
   // Everything else already in the framebuffer is left untouched.
+  // Snapshot selectorIndex once: loop() mutates it from the main task without the
+  // render lock, so re-reading it mid-render would let paintedSelector diverge from
+  // the row actually filled — leaving the old highlight uncleared on fast scrolls.
+  const int sel = selectorIndex;
   if (state == BrowserState::BROWSING && coversEnabled && !entries.empty() && richListPainted) {
     const int pageItems = itemsPerPage();
-    const int pageStart = selectorIndex / pageItems * pageItems;
-    if (pageStart == paintedPageStart && hintLabelsSame(paintedSelector, selectorIndex)) {
-      if (paintedSelector != selectorIndex) {
+    const int pageStart = sel / pageItems * pageItems;
+    if (pageStart == paintedPageStart && hintLabelsSame(paintedSelector, sel)) {
+      if (paintedSelector != sel) {
         const int rowH = rowHeight();
         const int oldRowY = RICH_LIST_TOP + (paintedSelector % pageItems) * rowH;
-        const int newRowY = RICH_LIST_TOP + (selectorIndex % pageItems) * rowH;
+        const int newRowY = RICH_LIST_TOP + (sel % pageItems) * rowH;
         renderRichRow(paintedSelector, oldRowY, rowH, false);  // clear old highlight
-        renderRichRow(selectorIndex, newRowY, rowH, true);     // draw new highlight
-        paintedSelector = selectorIndex;
+        renderRichRow(sel, newRowY, rowH, true);               // draw new highlight
+        paintedSelector = sel;
       }
       renderer.displayBuffer();
       return;
@@ -397,16 +401,19 @@ void OpdsBookBrowserActivity::renderTextList() {
 void OpdsBookBrowserActivity::renderRichList() {
   const int pageItems = itemsPerPage();
   const int rowH = rowHeight();
-  const int pageStartIndex = selectorIndex / pageItems * pageItems;
+  // Snapshot selectorIndex once so the highlighted row and paintedSelector agree even
+  // if loop() advances the selection mid-paint (see the fast path in render()).
+  const int sel = selectorIndex;
+  const int pageStartIndex = sel / pageItems * pageItems;
   for (int i = pageStartIndex; i < static_cast<int>(entries.size()) && i < pageStartIndex + pageItems; i++) {
     const int rowY = RICH_LIST_TOP + (i % pageItems) * rowH;
-    renderRichRow(i, rowY, rowH, i == selectorIndex);
+    renderRichRow(i, rowY, rowH, i == sel);
   }
   // The framebuffer now holds this page's covers + text + highlight, so a
   // subsequent same-page move can take the two-row repaint fast path in render().
   richListPainted = true;
   paintedPageStart = pageStartIndex;
-  paintedSelector = selectorIndex;
+  paintedSelector = sel;
 }
 
 bool OpdsBookBrowserActivity::hintLabelsSame(int a, int b) const {
