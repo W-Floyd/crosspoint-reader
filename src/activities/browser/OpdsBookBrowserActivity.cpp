@@ -31,10 +31,11 @@ constexpr int TEXT_LIST_TOP = 60;
 
 // Rich-list layout (cover thumbnails enabled): a cover on the left, stacked
 // metadata on the right. Row height is derived from font line heights (see
-// rowHeight()) so the four metadata lines never overlap.
-constexpr int RICH_LIST_TOP = 40;
-constexpr int RICH_BOTTOM_MARGIN = 36;  // Room for the button-hint bar
-constexpr int RICH_ROW_PAD = 6;
+// rowHeight()) so the four metadata lines never overlap. The header title is
+// drawn at y=15 in UI_12 (ink bottom ~44); starting at 48 clears it by a few px
+// while still fitting the maximum rows on an X3 (792 tall: 7 rows vs 6 at >=50).
+constexpr int RICH_LIST_TOP = 48;
+constexpr int RICH_ROW_PAD = 5;
 constexpr int RICH_SIDE_MARGIN = 10;
 constexpr int RICH_TEXT_GAP = 10;   // Gap between thumbnail and text column
 constexpr int RICH_META_LINES = 2;  // Metadata lines below the title (format+author/series, summary)
@@ -658,7 +659,10 @@ int OpdsBookBrowserActivity::rowHeight() const {
 
 int OpdsBookBrowserActivity::itemsPerPage() const {
   if (!coversEnabled) return TEXT_PAGE_ITEMS;
-  const int usable = renderer.getScreenHeight() - RICH_LIST_TOP - RICH_BOTTOM_MARGIN;
+  // Reserve the theme's actual button-hint bar height so the last row can't spill
+  // into it (the hints are drawn first, so an overspilling row would clip them).
+  const int hintBar = UITheme::getInstance().getMetrics().buttonHintsHeight;
+  const int usable = renderer.getScreenHeight() - RICH_LIST_TOP - hintBar;
   const int rows = usable / rowHeight();
   return rows < 1 ? 1 : rows;
 }
