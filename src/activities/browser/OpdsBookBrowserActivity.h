@@ -15,7 +15,17 @@
  */
 class OpdsBookBrowserActivity final : public Activity {
  public:
-  enum class BrowserState { CHECK_WIFI, WIFI_SELECTION, LOADING, BROWSING, DOWNLOADING, ERROR, SEARCH_INPUT };
+  enum class BrowserState {
+    CHECK_WIFI,
+    WIFI_SELECTION,
+    LOADING,
+    BROWSING,
+    DOWNLOADING,
+    BULK_DOWNLOADING,  // Scanning the feed, then downloading every not-yet-present book
+    BULK_DONE,         // Post-bulk summary screen (dismiss with any key)
+    ERROR,
+    SEARCH_INPUT
+  };
 
   explicit OpdsBookBrowserActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, OpdsServer server)
       : Activity("OpdsBookBrowser", renderer, mappedInput), buttonNavigator(), server(std::move(server)) {}
@@ -39,6 +49,15 @@ class OpdsBookBrowserActivity final : public Activity {
   std::string statusMessage;
   size_t downloadProgress = 0;
   size_t downloadTotal = 0;
+
+  // --- Bulk "download all in this feed" (long-press Confirm) ---
+  bool bulkLongPressFired = false;  // Hold fired; swallow the release so it doesn't also single-download
+  bool bulkCancel = false;          // Set from the progress callback (Back); passed as downloadToFile cancelFlag
+  int bulkTotalCount = 0;           // Not-yet-present books found by the scan pass (0 while scanning)
+  int bulkCurrentIndex = 0;         // 1-based index of the book currently downloading
+  int bulkOkCount = 0;              // Books downloaded OK this run
+  int bulkFailCount = 0;            // Books that failed (non-cancel) this run
+  std::string bulkSummary;          // Message shown on the BULK_DONE screen
 
   // Per-entry cover-fetch state (parallel to `entries`), used only when cover
   // thumbnails are enabled. Reset whenever the entry list changes.
@@ -75,6 +94,12 @@ class OpdsBookBrowserActivity final : public Activity {
   void navigateToEntry(const OpdsEntry& entry);
   void navigateBack();
   void downloadBook(const OpdsEntry& book);
+  // Fetch+parse a single feed page (no UI side effects, does not touch `entries`).
+  // Returns false on fetch/parse error. outNextPageUrl is the absolute next-page
+  // URL, or empty on the last page.
+  bool fetchFeedPage(const std::string& pageUrl, std::vector<OpdsEntry>& outEntries, std::string& outNextPageUrl);
+  void promptBulkDownload();  // Scan the feed's pages for missing books, then confirm the count
+  void runBulkDownload();     // Download every not-yet-present book across the feed's pages, with cancel
   std::string localFilename(const OpdsEntry& book) const;         // SD path the downloader writes to
   void drawCheck(int x, int y, int size, bool state);             // Bare checkmark (two strokes) within a size box
   void drawDownloadedBadge(int x, int y, int size, bool invert);  // Chip + check for the cover corner

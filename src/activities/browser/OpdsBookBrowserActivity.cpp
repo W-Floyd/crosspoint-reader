@@ -14,6 +14,7 @@
 #include "MappedInputManager.h"
 #include "SilentRestart.h"
 #include "activities/network/WifiSelectionActivity.h"
+#include "activities/util/ConfirmationActivity.h"
 #include "activities/util/KeyboardEntryActivity.h"
 #include "components/UITheme.h"
 #include "components/icons/book24.h"
@@ -49,6 +50,13 @@ constexpr int ICON_SIZE = 24;  // Placeholder icon assets are 24x24 (drawIcon do
 
 constexpr int DOWNLOAD_PROGRESS_STEP_PERCENT = 5;
 constexpr unsigned long DOWNLOAD_PROGRESS_MIN_UPDATE_MS = 5000;
+
+// Long-press duration on Confirm to trigger a bulk "download all" of the feed
+// (matches the hold-to-act threshold used elsewhere, e.g. RecentBooksActivity).
+constexpr unsigned long BULK_LONG_PRESS_MS = 1000;
+// Hard cap on feed pages walked during a bulk scan/download, so a malformed
+// next-page link can't loop forever.
+constexpr int MAX_BULK_FEED_PAGES = 100;
 
 // Defer cover fetch/decode until input has been idle this long. This must be
 // comfortably longer than one e-ink refresh + a human's re-press cadence — a
@@ -112,6 +120,10 @@ void OpdsBookBrowserActivity::onEnter() {
   selectorIndex = 0;
   consumeConfirm = false;
   consumeBack = false;
+  bulkLongPressFired = false;
+  bulkCancel = false;
+  bulkTotalCount = bulkCurrentIndex = bulkOkCount = bulkFailCount = 0;
+  bulkSummary.clear();
   errorMessage.clear();
   statusMessage = tr(STR_CHECKING_WIFI);
   coversEnabled = SETTINGS.opdsCoverThumbnails != 0;
@@ -176,9 +188,36 @@ void OpdsBookBrowserActivity::loop() {
     return;
   }
 
-  if (state == BrowserState::DOWNLOADING) return;
+  // Bulk scan/download drives its own UI from within promptBulkDownload/
+  // runBulkDownload (blocking, cancel handled inside the progress callback).
+  if (state == BrowserState::DOWNLOADING || state == BrowserState::BULK_DOWNLOADING) return;
+
+  if (state == BrowserState::BULK_DONE) {
+    if (mappedInput.wasReleased(MappedInputManager::Button::Confirm) ||
+        mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+      state = BrowserState::BROWSING;
+      richListPainted = false;
+      requestUpdate();
+    }
+    return;
+  }
 
   if (state == BrowserState::BROWSING) {
+    // Long-press Confirm: bulk-download every not-yet-present book in this feed.
+    // The guard swallows input until Confirm is physically released, so the
+    // release that ends the hold doesn't also trigger a single download/navigate
+    // (firmware hold-to-act pattern, cf. RecentBooksActivity).
+    if (bulkLongPressFired) {
+      if (!mappedInput.isPressed(MappedInputManager::Button::Confirm)) bulkLongPressFired = false;
+      return;
+    }
+    if (!entries.empty() && mappedInput.isPressed(MappedInputManager::Button::Confirm) &&
+        mappedInput.getHeldTime() >= BULK_LONG_PRESS_MS) {
+      bulkLongPressFired = true;
+      promptBulkDownload();
+      return;
+    }
+
     if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
       if (!entries.empty()) {
         const auto& entry = entries[selectorIndex];
@@ -280,6 +319,38 @@ void OpdsBookBrowserActivity::render(RenderLock&&) {
       GUI.drawProgressBar(renderer, Rect{50, pageHeight / 2 + 20, pageWidth - 100, 20}, downloadProgress,
                           downloadTotal);
     }
+    renderer.displayBuffer();
+    return;
+  }
+
+  if (state == BrowserState::BULK_DOWNLOADING) {
+    if (bulkTotalCount == 0) {
+      // Scan phase: no per-book progress yet.
+      renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2, tr(STR_SCANNING));
+    } else {
+      renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 - 55, tr(STR_DOWNLOADING));
+      char counter[32];
+      snprintf(counter, sizeof(counter), tr(STR_OPDS_DOWNLOADING_N), bulkCurrentIndex, bulkTotalCount);
+      renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 - 30, counter);
+      if (!statusMessage.empty()) {
+        auto title = renderer.truncatedText(UI_10_FONT_ID, statusMessage.c_str(), pageWidth - 40);
+        renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 - 5, title.c_str());
+      }
+      if (downloadTotal > 0) {
+        GUI.drawProgressBar(renderer, Rect{50, pageHeight / 2 + 20, pageWidth - 100, 20}, downloadProgress,
+                            downloadTotal);
+      }
+    }
+    const auto labels = mappedInput.mapLabels(tr(STR_CANCEL), "", "", "");
+    GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+    renderer.displayBuffer();
+    return;
+  }
+
+  if (state == BrowserState::BULK_DONE) {
+    renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2, bulkSummary.c_str());
+    const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_CONFIRM), "", "");
+    GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
     renderer.displayBuffer();
     return;
   }
@@ -610,6 +681,178 @@ void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& book) {
     state = BrowserState::ERROR;
     errorMessage = tr(STR_DOWNLOAD_FAILED);
   }
+  requestUpdate();
+}
+
+bool OpdsBookBrowserActivity::fetchFeedPage(const std::string& pageUrl, std::vector<OpdsEntry>& outEntries,
+                                            std::string& outNextPageUrl) {
+  OpdsParser parser(OpdsParser::DEFAULT_MAX_ENTRIES);
+  {
+    OpdsParserStream stream{parser};
+    if (!HttpDownloader::fetchUrl(pageUrl, stream, server.username, server.password)) return false;
+  }
+  if (!parser) return false;
+  const auto& nextUrl = parser.getNextPageUrl();
+  outNextPageUrl = nextUrl.empty() ? std::string() : UrlUtils::buildUrl(pageUrl, nextUrl);
+  outEntries = std::move(parser).getEntries();
+  return true;
+}
+
+void OpdsBookBrowserActivity::promptBulkDownload() {
+  // Scan every page of the current feed (following next-page links; no descent
+  // into sub-folders) for books not already on the SD card, so we can warn the
+  // user how many will be downloaded before starting. Uses a local parser per
+  // page — the displayed `entries` are left untouched so we can return to them.
+  state = BrowserState::BULK_DOWNLOADING;
+  statusMessage.clear();
+  downloadProgress = downloadTotal = 0;
+  bulkTotalCount = bulkCurrentIndex = 0;
+  requestUpdate(true);
+
+  size_t count = 0;
+  uint64_t totalBytes = 0;
+  bool sizeApprox = false;
+  std::string pageUrl = UrlUtils::buildUrl(server.url, currentPath);
+  std::vector<OpdsEntry> pageEntries;
+  std::string nextUrl;
+  int pages = 0;
+  bool firstFetchFailed = false;
+  while (!pageUrl.empty() && pages < MAX_BULK_FEED_PAGES) {
+    if (!fetchFeedPage(pageUrl, pageEntries, nextUrl)) {
+      if (pages == 0) firstFetchFailed = true;
+      break;  // best-effort: offer to download whatever we managed to scan
+    }
+    for (const auto& e : pageEntries) {
+      if (e.type != OpdsEntryType::BOOK) continue;
+      if (Storage.exists(localFilename(e).c_str())) continue;
+      count++;
+      if (e.fileSizeBytes == 0)
+        sizeApprox = true;
+      else
+        totalBytes += e.fileSizeBytes;
+    }
+    pageUrl = nextUrl;
+    pages++;
+  }
+
+  if (firstFetchFailed) {
+    state = BrowserState::ERROR;
+    errorMessage = tr(STR_FETCH_FEED_FAILED);
+    requestUpdate();
+    return;
+  }
+
+  if (count == 0) {
+    bulkSummary = tr(STR_OPDS_NO_NEW_BOOKS);
+    state = BrowserState::BULK_DONE;
+    requestUpdate();
+    return;
+  }
+
+  bulkTotalCount = static_cast<int>(count);
+
+  // Confirmation body: "<N> books" plus an approximate total size when the feed
+  // advertised one (prefixed with ~ if any entry omitted its length).
+  char body[64];
+  const std::string sizeStr = formatSize(totalBytes);
+  if (sizeStr.empty()) {
+    snprintf(body, sizeof(body), tr(STR_OPDS_BULK_CONFIRM_COUNT), static_cast<int>(count));
+  } else {
+    const std::string sized = (sizeApprox ? "~" : "") + sizeStr;
+    snprintf(body, sizeof(body), tr(STR_OPDS_BULK_CONFIRM_SIZE), static_cast<int>(count), sized.c_str());
+  }
+
+  // ConfirmationActivity overlays this activity; on cancel we resume in BROWSING.
+  state = BrowserState::BROWSING;
+  richListPainted = false;
+  startActivityForResult(std::make_unique<ConfirmationActivity>(renderer, mappedInput, tr(STR_DOWNLOAD_ALL), body),
+                         [this](const ActivityResult& result) {
+                           if (result.isCancelled) {
+                             requestUpdate();
+                             return;
+                           }
+                           runBulkDownload();
+                         });
+}
+
+void OpdsBookBrowserActivity::runBulkDownload() {
+  state = BrowserState::BULK_DOWNLOADING;
+  bulkCancel = false;
+  bulkCurrentIndex = 0;
+  bulkOkCount = bulkFailCount = 0;
+  downloadProgress = downloadTotal = 0;
+  statusMessage.clear();
+  requestUpdate(true);
+
+  std::string pageUrl = UrlUtils::buildUrl(server.url, currentPath);
+  std::vector<OpdsEntry> pageEntries;
+  std::string nextUrl;
+  int pages = 0;
+  while (!pageUrl.empty() && pages < MAX_BULK_FEED_PAGES && !bulkCancel) {
+    if (!fetchFeedPage(pageUrl, pageEntries, nextUrl)) break;
+    for (const auto& e : pageEntries) {
+      if (bulkCancel) break;
+      if (e.type != OpdsEntryType::BOOK) continue;
+      const std::string dest = localFilename(e);
+      if (Storage.exists(dest.c_str())) continue;  // already present, or grabbed earlier this run
+
+      bulkCurrentIndex++;
+      statusMessage = e.title;
+      downloadProgress = downloadTotal = 0;
+      requestUpdate(true);
+
+      const std::string url = UrlUtils::buildUrl(pageUrl, e.href);
+      LOG_DBG("OPDS", "Bulk downloading: %s -> %s", url.c_str(), dest.c_str());
+
+      int lastRenderedPercent = -1;
+      unsigned long lastProgressUpdateMs = 0;
+      const auto result = HttpDownloader::downloadToFile(
+          url, dest,
+          [this, &lastRenderedPercent, &lastProgressUpdateMs](const size_t downloaded, const size_t total) {
+            downloadProgress = downloaded;
+            downloadTotal = total;
+            // Poll for a cancel press without leaving the blocking download.
+            mappedInput.update();
+            if (mappedInput.isPressed(MappedInputManager::Button::Back)) bulkCancel = true;
+            const int percent = total > 0 ? static_cast<int>(static_cast<uint64_t>(downloaded) * 100 / total) : 0;
+            const unsigned long now = millis();
+            if (bulkCancel || percent >= 100 || lastRenderedPercent < 0 ||
+                percent >= lastRenderedPercent + DOWNLOAD_PROGRESS_STEP_PERCENT ||
+                now - lastProgressUpdateMs >= DOWNLOAD_PROGRESS_MIN_UPDATE_MS) {
+              lastRenderedPercent = percent;
+              lastProgressUpdateMs = now;
+              requestUpdate(true);
+            }
+          },
+          &bulkCancel, server.username, server.password);
+
+      if (result == HttpDownloader::OK) {
+        clearBookCache(dest);
+        bulkOkCount++;
+      } else if (result == HttpDownloader::ABORTED) {
+        break;  // user cancelled; the downloader already removed the partial file
+      } else {
+        LOG_ERR("OPDS", "Bulk download failed: %d", static_cast<int>(result));
+        bulkFailCount++;
+      }
+      vTaskDelay(1);  // yield between files so the watchdog is fed
+    }
+    pageUrl = nextUrl;
+    pages++;
+  }
+
+  // Refresh the visible page's downloaded badges to reflect the new local copies.
+  for (size_t i = 0; i < entries.size() && i < downloadedFlags.size(); i++) {
+    if (entries[i].type == OpdsEntryType::BOOK) {
+      downloadedFlags[i] = Storage.exists(localFilename(entries[i]).c_str()) ? 1 : 0;
+    }
+  }
+  richListPainted = false;
+
+  char summary[64];
+  snprintf(summary, sizeof(summary), tr(STR_OPDS_BULK_DONE), bulkOkCount, bulkFailCount);
+  bulkSummary = summary;
+  state = BrowserState::BULK_DONE;
   requestUpdate();
 }
 
