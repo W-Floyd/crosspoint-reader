@@ -37,7 +37,7 @@ constexpr int RICH_BOTTOM_MARGIN = 36;  // Room for the button-hint bar
 constexpr int RICH_ROW_PAD = 6;
 constexpr int RICH_SIDE_MARGIN = 10;
 constexpr int RICH_TEXT_GAP = 10;   // Gap between thumbnail and text column
-constexpr int RICH_META_LINES = 3;  // Metadata lines below the title (author/series, summary, format)
+constexpr int RICH_META_LINES = 2;  // Metadata lines below the title (format+author/series, summary)
 // Extra spacing added to each line's advance. The UI fonts render slightly taller
 // than their reported line height, so plain line-height stacking packs them too
 // tightly; this keeps the lines (notably the format footer) clearly separated.
@@ -63,20 +63,6 @@ constexpr size_t COVER_MODE_MAX_ENTRIES = 38;
 // times, so they load without the user re-entering the page.
 constexpr unsigned long COVER_RETRY_INTERVAL_MS = 1500;
 constexpr int MAX_COVER_RETRY_ROUNDS = 6;
-
-// Human-readable file size, e.g. "1.2 MB". Empty when size is unknown.
-std::string formatSize(uint64_t bytes) {
-  if (bytes == 0) return "";
-  char buf[24];
-  if (bytes >= 1024ULL * 1024ULL) {
-    snprintf(buf, sizeof(buf), "%.1f MB", static_cast<double>(bytes) / (1024.0 * 1024.0));
-  } else if (bytes >= 1024ULL) {
-    snprintf(buf, sizeof(buf), "%.0f KB", static_cast<double>(bytes) / 1024.0);
-  } else {
-    snprintf(buf, sizeof(buf), "%llu B", static_cast<unsigned long long>(bytes));
-  }
-  return buf;
-}
 
 // Short format label from an acquisition MIME type, e.g. "EPUB".
 std::string formatLabel(const std::string& mediaType) {
@@ -331,21 +317,13 @@ void OpdsBookBrowserActivity::renderRichRow(int entryIndex, int rowY, int rowHei
   const auto& entry = entries[entryIndex];
   const int pageWidth = renderer.getScreenWidth();
 
-  // Selection highlight matches the active theme's list style, taken from its
-  // selection metrics (light = grey fill / black text, else dark = black fill /
-  // inverted white text; radius per theme). Unselected rows fill white so the
-  // fast path in render() can repaint just the two rows whose highlight changed.
-  const auto& metrics = UITheme::getInstance().getMetrics();
-  const bool darkHighlight = !metrics.optionPopupSelectionLight;
-  const bool invert = selected && darkHighlight;  // white foreground on a dark highlight
+  // Selection highlight is drawn by the active theme so it matches its list style
+  // (grey/black, rounded/square) and tells us whether to invert the foreground.
+  // Unselected rows are cleared to white too, so the fast path in render() can
+  // repaint just the two rows whose highlight changed.
   const int hlX = RICH_SIDE_MARGIN / 2;
   const int hlW = pageWidth - RICH_SIDE_MARGIN;
-  if (selected) {
-    renderer.fillRoundedRect(hlX, rowY, hlW, rowHeight, metrics.optionPopupSelectionRadius,
-                             darkHighlight ? Color::Black : Color::LightGray);
-  } else {
-    renderer.fillRect(hlX, rowY, hlW, rowHeight, false);
-  }
+  const bool invert = GUI.drawListRowSelection(renderer, Rect{hlX, rowY, hlW, rowHeight}, selected);
 
   int thumbW, thumbH;
   thumbSize(thumbW, thumbH);
@@ -391,35 +369,42 @@ void OpdsBookBrowserActivity::renderRichRow(int entryIndex, int rowY, int rowHei
   renderer.drawText(UI_12_FONT_ID, textX, lineTop, title.c_str(), !invert, EpdFontFamily::BOLD);
   lineTop += titleLineH;
 
-  // Author / series line.
+  // Format tag + author / series line. The format leads as a faded-italic "(EPUB)"
+  // tag so it shares this line instead of wasting one of its own.
+  int cursorX = textX;
+  const std::string fmt = (entry.type == OpdsEntryType::BOOK) ? formatLabel(entry.mediaType) : std::string{};
+  if (!fmt.empty()) {
+    const std::string tag = "(" + fmt + ")";
+    renderer.drawText(UI_10_FONT_ID, cursorX, lineTop, tag.c_str(), !invert, EpdFontFamily::ITALIC);
+    const int tagW = renderer.getTextWidth(UI_10_FONT_ID, tag.c_str(), EpdFontFamily::ITALIC);
+    // Fade to secondary: checkerboard the tag with the row's background colour
+    // (same gray-text trick the theme list uses for dimmed rows).
+    const int lineH = renderer.getLineHeight(UI_10_FONT_ID);
+    for (int py = lineTop; py < lineTop + lineH; py++) {
+      for (int px = cursorX; px < cursorX + tagW; px++) {
+        if ((px + py) % 2 == 0) renderer.drawPixel(px, py, invert);
+      }
+    }
+    cursorX += tagW + renderer.getSpaceWidth(UI_10_FONT_ID);
+  }
+
   std::string authorLine = entry.author;
   if (!entry.series.empty()) {
     if (!authorLine.empty()) authorLine += " \xE2\x80\xA2 ";  // bullet
     authorLine += entry.series;
   }
   if (!authorLine.empty()) {
-    auto line = renderer.truncatedText(UI_10_FONT_ID, authorLine.c_str(), textW);
-    renderer.drawText(UI_10_FONT_ID, textX, lineTop, line.c_str(), !invert);
-    lineTop += metaLineH;
+    const int avail = textX + textW - cursorX;
+    auto line = renderer.truncatedText(UI_10_FONT_ID, authorLine.c_str(), avail);
+    renderer.drawText(UI_10_FONT_ID, cursorX, lineTop, line.c_str(), !invert);
   }
+  lineTop += metaLineH;
 
   // Summary snippet (single line).
   if (!entry.summary.empty()) {
     auto snippet = renderer.truncatedText(UI_10_FONT_ID, entry.summary.c_str(), textW);
     renderer.drawText(UI_10_FONT_ID, textX, lineTop, snippet.c_str(), !invert);
     lineTop += metaLineH;
-  }
-
-  // Format / size line for books.
-  if (entry.type == OpdsEntryType::BOOK) {
-    const std::string fmt = formatLabel(entry.mediaType);
-    const std::string size = formatSize(entry.fileSizeBytes);
-    std::string footer = fmt;
-    if (!size.empty()) {
-      if (!footer.empty()) footer += " \xE2\x80\xA2 ";
-      footer += size;
-    }
-    if (!footer.empty()) renderer.drawText(UI_10_FONT_ID, textX, lineTop, footer.c_str(), !invert);
   }
 }
 
