@@ -6,9 +6,10 @@
  * On-SD cache for OPDS catalog cover thumbnails.
  *
  * Covers are fetched (JPEG) → decoded/downscaled (JPEGDEC) → stored as a
- * pre-rendered grayscale BMP at the row-thumbnail size, keyed by a hash of the
- * absolute cover URL plus the target size. This mirrors the home-screen cover
- * thumb approach so the browser can blit a cached BMP straight to the framebuffer.
+ * pre-rendered 1-bit Atkinson-dithered BMP at the row-thumbnail size, keyed by a
+ * hash of the absolute cover URL, the target size, and a format tag. This mirrors
+ * the home-screen cover thumb approach so the browser can blit a cached BMP
+ * straight to the fast B/W framebuffer.
  *
  * Memory discipline (OOM is the dominant risk on this hardware):
  *  - Decodes happen one at a time; the caller must never run two ensure() calls

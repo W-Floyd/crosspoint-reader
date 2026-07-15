@@ -333,12 +333,15 @@ When the **OPDS Cover Thumbnails** setting is enabled, the OPDS browser caches
 catalog cover art here as pre-rendered grayscale BMPs, mirroring the home-screen
 cover-thumb approach so a cached cover can be blitted straight to the framebuffer.
 
-- Each file is a standard 2-bit grayscale BMP (see `JpegToBmpConverter`), so there
-  is **no versioned binary header** to bump — the format matches the home-screen
-  thumbnails.
+- Each file is a standard 1-bit Atkinson-dithered BMP (see `JpegToBmpConverter`),
+  matching the home-screen thumbnails and blitting cleanly to the fast B/W
+  framebuffer. There is **no versioned binary header** to bump; instead the cache
+  key carries a format tag (see below), so changing the decode format misses
+  cleanly rather than serving stale art.
 - File name: `<hash>.bmp`, where `<hash>` is `std::hash` of the absolute cover URL
-  (query string intact, e.g. `&preset=...`) plus the target thumbnail size. A
-  changed cover URL or a different render size misses cleanly.
+  (query string intact, e.g. `&preset=...`) plus the target thumbnail size and a
+  format tag (e.g. `v2`). A changed cover URL, a different render size, or a bumped
+  format tag all miss cleanly.
 - `<hash>.none` is a zero-length **sentinel** written when a cover is fetched but
   cannot be decoded, so an undecodable cover is not re-fetched on every visit.
 - The directory is size-capped (best-effort LRU eviction) to bound SD usage.

@@ -43,10 +43,12 @@ void writeSentinel(const std::string& path) {
 }  // namespace
 
 std::string OpdsCoverCache::keyHex(const std::string& absoluteUrl, const int thumbW, const int thumbH) {
-  // Key on the exact fetched URL (query string intact) plus the render size, so a
-  // resize or a changed cover URL (e.g. new timestamp/preset) misses cleanly.
-  char sizeSuffix[24];
-  snprintf(sizeSuffix, sizeof(sizeSuffix), "|%dx%d", thumbW, thumbH);
+  // Key on the exact fetched URL (query string intact) plus the render size and a
+  // format tag, so a resize, a changed cover URL (e.g. new timestamp/preset), or a
+  // change to the decode format all miss cleanly. Bump the tag if the cached BMP
+  // format changes (currently v2 = 1-bit Atkinson dither).
+  char sizeSuffix[32];
+  snprintf(sizeSuffix, sizeof(sizeSuffix), "|%dx%d|v2", thumbW, thumbH);
   const size_t h = std::hash<std::string>{}(absoluteUrl + sizeSuffix);
   char hex[2 * sizeof(size_t) + 1];
   snprintf(hex, sizeof(hex), "%zx", h);
@@ -95,7 +97,10 @@ OpdsCoverCache::Status OpdsCoverCache::ensure(const std::string& absoluteUrl, co
     HalFile jpeg;
     HalFile out;
     if (Storage.openFileForRead(MODULE, tmp, jpeg) && Storage.openFileForWrite(MODULE, bmp, out)) {
-      decoded = JpegToBmpConverter::jpegFileToBmpStreamWithSize(jpeg, out, thumbW, thumbH);
+      // 1-bit Atkinson-dithered BMP (as the home-screen thumbnails use): the
+      // browser blits it to the fast B/W framebuffer, so a proper 1-bit dither
+      // looks cleaner than a 2-bit image crushed to B/W at draw time.
+      decoded = JpegToBmpConverter::jpegFileTo1BitBmpStreamWithSize(jpeg, out, thumbW, thumbH);
       out.flush();
     }
     // jpeg/out close here (scope exit) before we remove/rewrite the files below.
