@@ -381,6 +381,13 @@ void RoundedRaffTheme::drawList(const GfxRenderer& renderer, Rect rect, int item
   drawScrollBar(renderer, rect, itemCount, pageStartIndex, pageItems);
 }
 
+bool RoundedRaffTheme::drawListRowSelection(const GfxRenderer& renderer, Rect rowRect, bool selected) const {
+  // RoundedRaff: black rounded highlight (matching drawList), white otherwise.
+  renderer.fillRoundedRect(rowRect.x, rowRect.y, rowRect.width, rowRect.height, kRowRadius,
+                           selected ? Color::Black : Color::White);
+  return selected;  // foreground inverts on the black highlight
+}
+
 void RoundedRaffTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, const char* btn2, const char* btn3,
                                        const char* btn4) const {
   const GfxRenderer::Orientation origOrientation = renderer.getOrientation();

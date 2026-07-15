@@ -317,6 +317,17 @@ void LyraTheme::drawList(const GfxRenderer& renderer, Rect rect, int itemCount, 
   }
 }
 
+bool LyraTheme::drawListRowSelection(const GfxRenderer& renderer, Rect rowRect, bool selected) const {
+  // Lyra: light-grey rounded highlight (matching drawList), white otherwise. Black
+  // foreground either way.
+  if (selected) {
+    renderer.fillRoundedRect(rowRect.x, rowRect.y, rowRect.width, rowRect.height, cornerRadius, Color::LightGray);
+  } else {
+    renderer.fillRect(rowRect.x, rowRect.y, rowRect.width, rowRect.height, false);
+  }
+  return false;
+}
+
 void LyraTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, const char* btn2, const char* btn3,
                                 const char* btn4) const {
   const GfxRenderer::Orientation orig_orientation = renderer.getOrientation();

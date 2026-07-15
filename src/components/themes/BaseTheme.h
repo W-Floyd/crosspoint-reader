@@ -219,6 +219,15 @@ class BaseTheme {
                         const std::function<UIIcon(int index)>& rowIcon = nullptr,
                         const std::function<std::string(int index)>& rowValue = nullptr, bool highlightValue = false,
                         const std::function<bool(int index)>& rowDimmed = nullptr) const;
+
+  // Paint the background of a single list row in this theme's selection style and
+  // return whether the row's foreground (text/icons) should be drawn inverted
+  // (light-on-dark). A selected row gets the highlight; an unselected row is
+  // cleared to the normal (white) background. This lets a custom rich list that
+  // draws its own rows (OPDS cover browser, and future rich local-book browsing)
+  // match the theme's built-in `drawList` highlight without reimplementing it.
+  // Default (Classic): solid black highlight with inverted foreground.
+  virtual bool drawListRowSelection(const GfxRenderer& renderer, Rect rowRect, bool selected) const;
   virtual void drawHeader(const GfxRenderer& renderer, Rect rect, const char* title,
                           const char* subtitle = nullptr) const;
   virtual void drawSubHeader(const GfxRenderer& renderer, Rect rect, const char* label,

@@ -351,6 +351,12 @@ void BaseTheme::drawList(const GfxRenderer& renderer, Rect rect, int itemCount, 
   }
 }
 
+bool BaseTheme::drawListRowSelection(const GfxRenderer& renderer, Rect rowRect, bool selected) const {
+  // Classic: solid black highlight (matching drawList's fillRect), white otherwise.
+  renderer.fillRect(rowRect.x, rowRect.y, rowRect.width, rowRect.height, selected);
+  return selected;  // foreground inverts on the black highlight
+}
+
 void BaseTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const char* title, const char* subtitle) const {
   // Hide last battery draw
   constexpr int maxBatteryWidth = 80;
