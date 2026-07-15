@@ -1,11 +1,15 @@
 #include "OpdsBookBrowserActivity.h"
 
 #include <Arduino.h>
+#include <Bitmap.h>
+#include <CrossPointSettings.h>
 #include <GfxRenderer.h>
 #include <I18n.h>
 #include <Logging.h>
 #include <OpdsStream.h>
 #include <WiFi.h>
+
+#include <cstdio>
 
 #include "MappedInputManager.h"
 #include "SilentRestart.h"
@@ -14,14 +18,73 @@
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "network/HttpDownloader.h"
+#include "network/OpdsCoverCache.h"
 #include "util/BookCacheUtils.h"
 #include "util/StringUtils.h"
 #include "util/UrlUtils.h"
 
 namespace {
-constexpr int PAGE_ITEMS = 23;
+// Text-list layout (cover thumbnails disabled): compact 30 px rows from y=60.
+constexpr int TEXT_PAGE_ITEMS = 23;
+constexpr int TEXT_ROW_HEIGHT = 30;
+constexpr int TEXT_LIST_TOP = 60;
+
+// Rich-list layout (cover thumbnails enabled): a cover on the left, stacked
+// metadata on the right. Row height is derived from font line heights (see
+// rowHeight()) so the four metadata lines never overlap.
+constexpr int RICH_LIST_TOP = 40;
+constexpr int RICH_BOTTOM_MARGIN = 36;  // Room for the button-hint bar
+constexpr int RICH_ROW_PAD = 6;
+constexpr int RICH_SIDE_MARGIN = 10;
+constexpr int RICH_TEXT_GAP = 10;   // Gap between thumbnail and text column
+constexpr int RICH_META_LINES = 3;  // Metadata lines below the title (author/series, summary, format)
+// Extra spacing added to each line's advance. The UI fonts render slightly taller
+// than their reported line height, so plain line-height stacking packs them too
+// tightly; this keeps the lines (notably the format footer) clearly separated.
+constexpr int RICH_LINE_GAP = 4;
+
 constexpr int DOWNLOAD_PROGRESS_STEP_PERCENT = 5;
 constexpr unsigned long DOWNLOAD_PROGRESS_MIN_UPDATE_MS = 5000;
+
+// Defer cover fetch/decode until input has been idle this long. This must be
+// comfortably longer than one e-ink refresh + a human's re-press cadence — a
+// short window reopens between single presses, so a blocking decode fires right
+// before the next press and every scroll step pays for a fetch. Covers instead
+// load once the user actually pauses.
+constexpr unsigned long COVER_IDLE_MS = 900;
+
+// Entries held per feed page when cover thumbnails are on. Smaller than the
+// parser default to leave heap for one cover decode with WiFi up (~272 bytes per
+// held entry). Larger catalogs page via the feed's next/prev links.
+constexpr size_t COVER_MODE_MAX_ENTRIES = 38;
+
+// Auto-retry covers that were skipped transiently (low heap / flaky download):
+// re-arm the visible page's skipped covers every interval, a bounded number of
+// times, so they load without the user re-entering the page.
+constexpr unsigned long COVER_RETRY_INTERVAL_MS = 1500;
+constexpr int MAX_COVER_RETRY_ROUNDS = 6;
+
+// Human-readable file size, e.g. "1.2 MB". Empty when size is unknown.
+std::string formatSize(uint64_t bytes) {
+  if (bytes == 0) return "";
+  char buf[24];
+  if (bytes >= 1024ULL * 1024ULL) {
+    snprintf(buf, sizeof(buf), "%.1f MB", static_cast<double>(bytes) / (1024.0 * 1024.0));
+  } else if (bytes >= 1024ULL) {
+    snprintf(buf, sizeof(buf), "%.0f KB", static_cast<double>(bytes) / 1024.0);
+  } else {
+    snprintf(buf, sizeof(buf), "%llu B", static_cast<unsigned long long>(bytes));
+  }
+  return buf;
+}
+
+// Short format label from an acquisition MIME type, e.g. "EPUB".
+std::string formatLabel(const std::string& mediaType) {
+  if (mediaType.find("epub") != std::string::npos) return "EPUB";
+  if (mediaType.find("pdf") != std::string::npos) return "PDF";
+  if (mediaType.empty()) return "";
+  return "";
+}
 }  // namespace
 
 void OpdsBookBrowserActivity::onEnter() {
@@ -29,6 +92,7 @@ void OpdsBookBrowserActivity::onEnter() {
 
   state = BrowserState::CHECK_WIFI;
   entries.clear();
+  coverStates.clear();
   navigationHistory.clear();
   searchTemplate = "";
   currentPath = "";
@@ -37,6 +101,12 @@ void OpdsBookBrowserActivity::onEnter() {
   consumeBack = false;
   errorMessage.clear();
   statusMessage = tr(STR_CHECKING_WIFI);
+  coversEnabled = SETTINGS.opdsCoverThumbnails != 0;
+  richListPainted = false;
+
+  // Bound the on-SD cover cache once per browse session (cheap, off the render path).
+  if (coversEnabled) OpdsCoverCache::enforceBudget();
+
   requestUpdate();
 
   checkAndConnectWifi();
@@ -45,6 +115,7 @@ void OpdsBookBrowserActivity::onEnter() {
 void OpdsBookBrowserActivity::onExit() {
   Activity::onExit();
   entries.clear();
+  coverStates.clear();
   navigationHistory.clear();
 
   if (WiFi.getMode() != WIFI_MODE_NULL) {
@@ -106,27 +177,62 @@ void OpdsBookBrowserActivity::loop() {
     }
 
     if (!entries.empty()) {
+      const int pageItems = itemsPerPage();
       buttonNavigator.onNextRelease([this] {
         selectorIndex = ButtonNavigator::nextIndex(selectorIndex, entries.size());
+        lastInteractionMs = millis();
         requestUpdate();
       });
       buttonNavigator.onPreviousRelease([this] {
         selectorIndex = ButtonNavigator::previousIndex(selectorIndex, entries.size());
+        lastInteractionMs = millis();
         requestUpdate();
       });
-      buttonNavigator.onNextContinuous([this] {
-        selectorIndex = ButtonNavigator::nextPageIndex(selectorIndex, entries.size(), PAGE_ITEMS);
+      buttonNavigator.onNextContinuous([this, pageItems] {
+        selectorIndex = ButtonNavigator::nextPageIndex(selectorIndex, entries.size(), pageItems);
+        lastInteractionMs = millis();
         requestUpdate();
       });
-      buttonNavigator.onPreviousContinuous([this] {
-        selectorIndex = ButtonNavigator::previousPageIndex(selectorIndex, entries.size(), PAGE_ITEMS);
+      buttonNavigator.onPreviousContinuous([this, pageItems] {
+        selectorIndex = ButtonNavigator::previousPageIndex(selectorIndex, entries.size(), pageItems);
+        lastInteractionMs = millis();
         requestUpdate();
       });
     }
+
+    // Lazily fetch/decode one cover per loop — visible rows first, then prefetch
+    // off-screen ones so scrolling into them is instant (never more than one decode
+    // in flight; skips under heap pressure). Runs after input, and only once input
+    // has been idle, so navigation stays responsive.
+    if (coversEnabled) loadNextCover();
   }
 }
 
 void OpdsBookBrowserActivity::render(RenderLock&&) {
+  // Fast path: a same-page selection move in the rich cover list. Rather than
+  // clearing and re-blitting every visible cover, repaint only the two rows whose
+  // highlight changed — the old row loses its grey fill, the new one gains it.
+  // Everything else already in the framebuffer is left untouched.
+  if (state == BrowserState::BROWSING && coversEnabled && !entries.empty() && richListPainted) {
+    const int pageItems = itemsPerPage();
+    const int pageStart = selectorIndex / pageItems * pageItems;
+    if (pageStart == paintedPageStart && hintLabelsSame(paintedSelector, selectorIndex)) {
+      if (paintedSelector != selectorIndex) {
+        const int rowH = rowHeight();
+        const int oldRowY = RICH_LIST_TOP + (paintedSelector % pageItems) * rowH;
+        const int newRowY = RICH_LIST_TOP + (selectorIndex % pageItems) * rowH;
+        renderRichRow(paintedSelector, oldRowY, rowH, false);  // clear old highlight
+        renderRichRow(selectorIndex, newRowY, rowH, true);     // draw new highlight
+        paintedSelector = selectorIndex;
+      }
+      renderer.displayBuffer();
+      return;
+    }
+  }
+
+  // Full render invalidates the fast-path state until the rich list repaints it.
+  richListPainted = false;
+
   renderer.clearScreen();
   const auto pageWidth = renderer.getScreenWidth();
   const auto pageHeight = renderer.getScreenHeight();
@@ -172,20 +278,149 @@ void OpdsBookBrowserActivity::render(RenderLock&&) {
 
   if (entries.empty()) {
     renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2, tr(STR_NO_ENTRIES));
+  } else if (coversEnabled) {
+    renderRichList();
   } else {
-    const auto pageStartIndex = selectorIndex / PAGE_ITEMS * PAGE_ITEMS;
-    renderer.fillRect(0, 60 + (selectorIndex % PAGE_ITEMS) * 30 - 2, pageWidth - 1, 30);
-
-    for (size_t i = pageStartIndex; i < entries.size() && i < static_cast<size_t>(pageStartIndex + PAGE_ITEMS); i++) {
-      const auto& entry = entries[i];
-      std::string displayText = (entry.type == OpdsEntryType::NAVIGATION) ? "> " + entry.title : entry.title;
-      if (entry.type == OpdsEntryType::BOOK && !entry.author.empty()) displayText += " - " + entry.author;
-      auto item = renderer.truncatedText(UI_10_FONT_ID, displayText.c_str(), pageWidth - 40);
-      renderer.drawText(UI_10_FONT_ID, 20, 60 + (i % PAGE_ITEMS) * 30, item.c_str(),
-                        i != static_cast<size_t>(selectorIndex));
-    }
+    renderTextList();
   }
   renderer.displayBuffer();
+}
+
+void OpdsBookBrowserActivity::renderTextList() {
+  const auto pageWidth = renderer.getScreenWidth();
+  const auto pageStartIndex = selectorIndex / TEXT_PAGE_ITEMS * TEXT_PAGE_ITEMS;
+  renderer.fillRect(0, TEXT_LIST_TOP + (selectorIndex % TEXT_PAGE_ITEMS) * TEXT_ROW_HEIGHT - 2, pageWidth - 1,
+                    TEXT_ROW_HEIGHT);
+
+  for (size_t i = pageStartIndex; i < entries.size() && i < static_cast<size_t>(pageStartIndex + TEXT_PAGE_ITEMS);
+       i++) {
+    const auto& entry = entries[i];
+    std::string displayText = (entry.type == OpdsEntryType::NAVIGATION) ? "> " + entry.title : entry.title;
+    if (entry.type == OpdsEntryType::BOOK && !entry.author.empty()) displayText += " - " + entry.author;
+    auto item = renderer.truncatedText(UI_10_FONT_ID, displayText.c_str(), pageWidth - 40);
+    renderer.drawText(UI_10_FONT_ID, 20, TEXT_LIST_TOP + (i % TEXT_PAGE_ITEMS) * TEXT_ROW_HEIGHT, item.c_str(),
+                      i != static_cast<size_t>(selectorIndex));
+  }
+}
+
+void OpdsBookBrowserActivity::renderRichList() {
+  const int pageItems = itemsPerPage();
+  const int rowH = rowHeight();
+  const int pageStartIndex = selectorIndex / pageItems * pageItems;
+  for (int i = pageStartIndex; i < static_cast<int>(entries.size()) && i < pageStartIndex + pageItems; i++) {
+    const int rowY = RICH_LIST_TOP + (i % pageItems) * rowH;
+    renderRichRow(i, rowY, rowH, i == selectorIndex);
+  }
+  // The framebuffer now holds this page's covers + text + highlight, so a
+  // subsequent same-page move can take the two-row repaint fast path in render().
+  richListPainted = true;
+  paintedPageStart = pageStartIndex;
+  paintedSelector = selectorIndex;
+}
+
+bool OpdsBookBrowserActivity::hintLabelsSame(int a, int b) const {
+  // Button-hint labels depend only on entry type (Download vs Open) and whether
+  // the row is the searchable index 0 (Search vs Dir-Up). If both match, the hint
+  // bar is unchanged and the outline-only fast path is safe.
+  const auto isBook = [this](int i) { return entries[i].type == OpdsEntryType::BOOK; };
+  const auto isSearchRow = [this](int i) { return !searchTemplate.empty() && i == 0; };
+  return isBook(a) == isBook(b) && isSearchRow(a) == isSearchRow(b);
+}
+
+void OpdsBookBrowserActivity::renderRichRow(int entryIndex, int rowY, int rowHeight, bool selected) {
+  const auto& entry = entries[entryIndex];
+  const int pageWidth = renderer.getScreenWidth();
+
+  // Selection highlight matches the active theme's list style, taken from its
+  // selection metrics (light = grey fill / black text, else dark = black fill /
+  // inverted white text; radius per theme). Unselected rows fill white so the
+  // fast path in render() can repaint just the two rows whose highlight changed.
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const bool darkHighlight = !metrics.optionPopupSelectionLight;
+  const bool invert = selected && darkHighlight;  // white foreground on a dark highlight
+  const int hlX = RICH_SIDE_MARGIN / 2;
+  const int hlW = pageWidth - RICH_SIDE_MARGIN;
+  if (selected) {
+    renderer.fillRoundedRect(hlX, rowY, hlW, rowHeight, metrics.optionPopupSelectionRadius,
+                             darkHighlight ? Color::Black : Color::LightGray);
+  } else {
+    renderer.fillRect(hlX, rowY, hlW, rowHeight, false);
+  }
+
+  int thumbW, thumbH;
+  thumbSize(thumbW, thumbH);
+  const int thumbX = RICH_SIDE_MARGIN;
+  const int thumbY = rowY + RICH_ROW_PAD;
+
+  bool coverDrawn = false;
+  if (entry.type == OpdsEntryType::BOOK && !entry.thumbnailUrl.empty() &&
+      coverStates[entryIndex] == CoverState::Ready) {
+    const std::string bmpPath = OpdsCoverCache::cachePath(resolveCoverUrl(entry.thumbnailUrl), thumbW, thumbH);
+    HalFile file;
+    if (Storage.openFileForRead("OPDS", bmpPath, file)) {
+      Bitmap bitmap(file);
+      if (bitmap.parseHeaders() == BmpReaderError::Ok) {
+        renderer.drawBitmap(bitmap, thumbX, thumbY, thumbW, thumbH);
+        renderer.drawRect(thumbX, thumbY, thumbW, thumbH, !invert);
+        coverDrawn = true;
+      }
+    }
+  }
+  if (!coverDrawn) {
+    // Placeholder box (pending cover, no cover, or navigation entry).
+    renderer.drawRect(thumbX, thumbY, thumbW, thumbH, !invert);
+    const char* glyph = (entry.type == OpdsEntryType::NAVIGATION) ? ">" : "?";
+    const int glyphW = renderer.getTextWidth(UI_12_FONT_ID, glyph);
+    const int glyphX = thumbX + (thumbW - glyphW) / 2;
+    // drawText's y is the line-box top; center the single line within the box.
+    const int glyphTop = thumbY + (thumbH - renderer.getLineHeight(UI_12_FONT_ID)) / 2;
+    renderer.drawText(UI_12_FONT_ID, glyphX, glyphTop, glyph, !invert);
+  }
+
+  // Metadata column. Lines are stacked top-down; `lineTop` is the line-box top
+  // (drawText adds the font ascender itself — see GfxRenderer::drawText). Each
+  // advance includes RICH_LINE_GAP so the lines never crowd each other.
+  const int textX = thumbX + thumbW + RICH_TEXT_GAP;
+  const int textW = pageWidth - textX - RICH_SIDE_MARGIN;
+  const int titleLineH = renderer.getLineHeight(UI_12_FONT_ID) + RICH_LINE_GAP;
+  const int metaLineH = renderer.getLineHeight(UI_10_FONT_ID) + RICH_LINE_GAP;
+  int lineTop = rowY + RICH_ROW_PAD;
+
+  // Title (bold, truncated).
+  auto title = renderer.truncatedText(UI_12_FONT_ID, entry.title.c_str(), textW, EpdFontFamily::BOLD);
+  renderer.drawText(UI_12_FONT_ID, textX, lineTop, title.c_str(), !invert, EpdFontFamily::BOLD);
+  lineTop += titleLineH;
+
+  // Author / series line.
+  std::string authorLine = entry.author;
+  if (!entry.series.empty()) {
+    if (!authorLine.empty()) authorLine += " \xE2\x80\xA2 ";  // bullet
+    authorLine += entry.series;
+  }
+  if (!authorLine.empty()) {
+    auto line = renderer.truncatedText(UI_10_FONT_ID, authorLine.c_str(), textW);
+    renderer.drawText(UI_10_FONT_ID, textX, lineTop, line.c_str(), !invert);
+    lineTop += metaLineH;
+  }
+
+  // Summary snippet (single line).
+  if (!entry.summary.empty()) {
+    auto snippet = renderer.truncatedText(UI_10_FONT_ID, entry.summary.c_str(), textW);
+    renderer.drawText(UI_10_FONT_ID, textX, lineTop, snippet.c_str(), !invert);
+    lineTop += metaLineH;
+  }
+
+  // Format / size line for books.
+  if (entry.type == OpdsEntryType::BOOK) {
+    const std::string fmt = formatLabel(entry.mediaType);
+    const std::string size = formatSize(entry.fileSizeBytes);
+    std::string footer = fmt;
+    if (!size.empty()) {
+      if (!footer.empty()) footer += " \xE2\x80\xA2 ";
+      footer += size;
+    }
+    if (!footer.empty()) renderer.drawText(UI_10_FONT_ID, textX, lineTop, footer.c_str(), !invert);
+  }
 }
 
 void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
@@ -198,7 +433,11 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
 
   std::string url = UrlUtils::buildUrl(server.url, path);
   LOG_DBG("OPDS", "Fetching: %s", url.c_str());
-  OpdsParser parser;
+  // With covers on, hold fewer entries per page so there's enough free heap to
+  // decode a cover thumbnail with WiFi up (the vector is kept for the whole
+  // browse session). Larger catalogs still page via the feed's next/prev links.
+  // Text-only browsing keeps the full default page size.
+  OpdsParser parser(coversEnabled ? COVER_MODE_MAX_ENTRIES : OpdsParser::DEFAULT_MAX_ENTRIES);
   {
     OpdsParserStream stream{parser};
     if (!HttpDownloader::fetchUrl(url, stream, server.username, server.password)) {
@@ -233,13 +472,25 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
     LOG_INF("OPDS", "Feed truncated to fit memory");
   }
 
+  // Parallel per-entry cover state, reset for the freshly loaded page. Treat the
+  // load as an interaction so covers only start after the page has had a moment
+  // to render (and don't stall a rapid drill-down through folders).
+  coverStates.assign(entries.size(), CoverState::Unknown);
+  lastInteractionMs = millis();
+  nextCoverRetryMs = 0;
+  coverRetryRounds = 0;
+  richListPainted = false;  // new page — next render must be a full paint
+
   selectorIndex = 0;
   state = entries.empty() ? BrowserState::ERROR : BrowserState::BROWSING;
   if (entries.empty()) errorMessage = tr(STR_NO_ENTRIES);
   requestUpdate();
 }
 
-void OpdsBookBrowserActivity::releaseEntries() { std::vector<OpdsEntry>().swap(entries); }
+void OpdsBookBrowserActivity::releaseEntries() {
+  std::vector<OpdsEntry>().swap(entries);
+  std::vector<CoverState>().swap(coverStates);
+}
 
 void OpdsBookBrowserActivity::navigateToEntry(const OpdsEntry& entry) {
   navigationHistory.push_back(currentPath);
@@ -397,5 +648,105 @@ void OpdsBookBrowserActivity::onWifiSelectionComplete(const bool connected) {
     state = BrowserState::ERROR;
     errorMessage = tr(STR_WIFI_CONN_FAILED);
     requestUpdate();
+  }
+}
+
+int OpdsBookBrowserActivity::rowHeight() const {
+  // Title (UI_12) + RICH_META_LINES metadata lines (UI_10), each with an added
+  // gap, plus top/bottom padding. Matches the per-line advances in renderRichRow().
+  return RICH_ROW_PAD * 2 + (renderer.getLineHeight(UI_12_FONT_ID) + RICH_LINE_GAP) +
+         RICH_META_LINES * (renderer.getLineHeight(UI_10_FONT_ID) + RICH_LINE_GAP);
+}
+
+int OpdsBookBrowserActivity::itemsPerPage() const {
+  if (!coversEnabled) return TEXT_PAGE_ITEMS;
+  const int usable = renderer.getScreenHeight() - RICH_LIST_TOP - RICH_BOTTOM_MARGIN;
+  const int rows = usable / rowHeight();
+  return rows < 1 ? 1 : rows;
+}
+
+void OpdsBookBrowserActivity::thumbSize(int& outW, int& outH) const {
+  outH = rowHeight() - 2 * RICH_ROW_PAD;  // fill the row height minus padding
+  outW = outH * 2 / 3;                    // typical book-cover aspect ratio
+}
+
+std::string OpdsBookBrowserActivity::resolveCoverUrl(const std::string& href) const {
+  // Resolve the (possibly relative) cover href against the current feed URL, so
+  // sub-navigated feeds keep the correct base. Query string is preserved by buildUrl.
+  const std::string feedUrl = UrlUtils::buildUrl(server.url, currentPath);
+  return UrlUtils::buildUrl(feedUrl, href);
+}
+
+bool OpdsBookBrowserActivity::tryDecodeFirstUnknownCover(int start, int end, bool visibleRange) {
+  for (int i = start; i < end; i++) {
+    if (coverStates[i] != CoverState::Unknown) continue;
+
+    const auto& e = entries[i];
+    if (e.type != OpdsEntryType::BOOK || e.thumbnailUrl.empty()) {
+      coverStates[i] = CoverState::None;  // nothing to fetch; keep scanning (cheap)
+      continue;
+    }
+
+    int tw, th;
+    thumbSize(tw, th);
+    const std::string absUrl = resolveCoverUrl(e.thumbnailUrl);
+    const auto status = OpdsCoverCache::ensure(absUrl, tw, th, server.username, server.password);
+    switch (status) {
+      case OpdsCoverCache::Status::Ready:
+        coverStates[i] = CoverState::Ready;
+        // Only repaint for on-screen covers; a prefetched off-screen cover just
+        // lands in the cache and will blit from there when scrolled into view.
+        if (visibleRange) {
+          richListPainted = false;  // a new visible cover must be blitted — force a full repaint
+          requestUpdate();          // progressive: redraw so this cover appears now
+        }
+        break;
+      case OpdsCoverCache::Status::NoCover:
+        coverStates[i] = CoverState::None;
+        break;
+      case OpdsCoverCache::Status::Skipped:
+        // Low heap / network hiccup — leave it; re-armed later while still in view.
+        coverStates[i] = CoverState::Skipped;
+        break;
+    }
+    return true;  // did one fetch/decode this loop
+  }
+  return false;
+}
+
+void OpdsBookBrowserActivity::loadNextCover() {
+  if (entries.empty() || coverStates.size() != entries.size()) return;
+
+  // Stay out of the way while the user is actively navigating; only fetch/decode
+  // once input has settled. A decode can block for seconds, so doing it mid-scroll
+  // is what makes paging feel laggy.
+  if (millis() - lastInteractionMs < COVER_IDLE_MS) return;
+
+  const int pageItems = itemsPerPage();
+  const int total = static_cast<int>(entries.size());
+  const int pageStart = selectorIndex / pageItems * pageItems;
+  int pageEnd = pageStart + pageItems;
+  if (pageEnd > total) pageEnd = total;
+
+  // Priority order: visible rows, then prefetch below (the likely scroll
+  // direction), then above. One fetch per loop keeps the loop responsive.
+  if (tryDecodeFirstUnknownCover(pageStart, pageEnd, true)) return;
+  if (tryDecodeFirstUnknownCover(pageEnd, total, false)) return;
+  if (tryDecodeFirstUnknownCover(0, pageStart, false)) return;
+
+  // Nothing left to fetch. If visible covers were skipped transiently, re-arm them
+  // for another attempt after a short delay — heap usually recovers once the feed's
+  // TLS buffers are freed. Bounded so a genuinely dead cover URL doesn't loop forever.
+  if (coverRetryRounds >= MAX_COVER_RETRY_ROUNDS || millis() < nextCoverRetryMs) return;
+  bool rearmed = false;
+  for (int i = pageStart; i < pageEnd; i++) {
+    if (coverStates[i] == CoverState::Skipped) {
+      coverStates[i] = CoverState::Unknown;
+      rearmed = true;
+    }
+  }
+  if (rearmed) {
+    coverRetryRounds++;
+    nextCoverRetryMs = millis() + COVER_RETRY_INTERVAL_MS;
   }
 }

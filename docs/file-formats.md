@@ -324,3 +324,24 @@ if (parsedSize != fileSize) {
     std::warning(std::format("Unparsed data detected: {} bytes remaining at offset 0x{:X}", fileSize - parsedSize, parsedSize));
 }
 ```
+
+## OPDS cover thumbnail cache
+
+Path: `/.crosspoint/opds_covers/`
+
+When the **OPDS Cover Thumbnails** setting is enabled, the OPDS browser caches
+catalog cover art here as pre-rendered grayscale BMPs, mirroring the home-screen
+cover-thumb approach so a cached cover can be blitted straight to the framebuffer.
+
+- Each file is a standard 2-bit grayscale BMP (see `JpegToBmpConverter`), so there
+  is **no versioned binary header** to bump — the format matches the home-screen
+  thumbnails.
+- File name: `<hash>.bmp`, where `<hash>` is `std::hash` of the absolute cover URL
+  (query string intact, e.g. `&preset=...`) plus the target thumbnail size. A
+  changed cover URL or a different render size misses cleanly.
+- `<hash>.none` is a zero-length **sentinel** written when a cover is fetched but
+  cannot be decoded, so an undecodable cover is not re-fetched on every visit.
+- The directory is size-capped (best-effort LRU eviction) to bound SD usage.
+
+Safe to delete at any time: `rm -rf /path/to/sd/.crosspoint/opds_covers/` just
+forces covers to be re-fetched and re-decoded on the next browse.

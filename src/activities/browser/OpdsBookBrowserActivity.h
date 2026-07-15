@@ -40,6 +40,26 @@ class OpdsBookBrowserActivity final : public Activity {
   size_t downloadProgress = 0;
   size_t downloadTotal = 0;
 
+  // Per-entry cover-fetch state (parallel to `entries`), used only when cover
+  // thumbnails are enabled. Reset whenever the entry list changes.
+  enum class CoverState : uint8_t {
+    Unknown,  // Not yet attempted this page visit
+    Ready,    // Decoded BMP is cached and renderable
+    None,     // No cover / undecodable — draw placeholder, do not retry
+    Skipped   // Deferred (low heap / network) — placeholder, retry on next page visit
+  };
+  bool coversEnabled = false;
+  std::vector<CoverState> coverStates;
+  // Timestamp of the last user interaction while browsing. Cover fetch/decode
+  // (which can block on network/SD) is deferred until input has been idle for a
+  // short window, so scrolling stays responsive and covers fill in once you pause.
+  unsigned long lastInteractionMs = 0;
+  // Bounded auto-retry for covers that were skipped transiently (low heap right
+  // after a feed fetch, or a flaky download), so they appear without the user
+  // having to leave and re-enter the page.
+  unsigned long nextCoverRetryMs = 0;
+  int coverRetryRounds = 0;
+
   OpdsServer server;  // Copied at construction — safe even if the store changes during browsing
 
   void checkAndConnectWifi();
@@ -53,4 +73,25 @@ class OpdsBookBrowserActivity final : public Activity {
   void launchSearch();
   void performSearch(const std::string& query);
   bool preventAutoSleep() override { return true; }
+
+  // --- Rich (cover thumbnail) browsing ---
+  int itemsPerPage() const;                                    // Rows per page for the active layout
+  int rowHeight() const;                                       // Rich-row height derived from font metrics
+  void thumbSize(int& outW, int& outH) const;                  // Row-thumbnail pixel size
+  std::string resolveCoverUrl(const std::string& href) const;  // Absolute cover URL vs feed base
+  void loadNextCover();  // Fetch/decode one pending cover per loop: visible first, then prefetch off-screen
+  // Decode the first still-Unknown cover in [start,end). Returns true if it did a
+  // fetch/decode (caller stops for this loop). visibleRange gates the repaint so
+  // prefetched off-screen covers don't trigger a needless full re-render.
+  bool tryDecodeFirstUnknownCover(int start, int end, bool visibleRange);
+  void renderRichRow(int entryIndex, int rowY, int rowHeight, bool selected);
+  void renderTextList();
+  void renderRichList();
+  bool hintLabelsSame(int a, int b) const;  // Do the two selections yield identical button hints?
+
+  // Fast-path repaint state: true when the framebuffer currently holds a fully
+  // painted rich list, so a same-page selection move can repaint only the outline.
+  bool richListPainted = false;
+  int paintedPageStart = -1;
+  int paintedSelector = -1;
 };

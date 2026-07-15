@@ -2,6 +2,7 @@
 #include <Print.h>
 #include <expat.h>
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -15,6 +16,10 @@ enum class OpdsEntryType {
 
 /**
  * Represents an entry from an OPDS feed (either a navigation link or a book).
+ *
+ * The richer metadata fields (thumbnail, series, summary, format, size) are all
+ * best-effort and bounded at parse time — a whole feed page of these structs
+ * lives in RAM at once, so every string is length-capped in the parser.
  */
 struct OpdsEntry {
   OpdsEntryType type = OpdsEntryType::NAVIGATION;
@@ -22,6 +27,13 @@ struct OpdsEntry {
   std::string author;  // Only for books
   std::string href;    // Navigation URL or epub download URL
   std::string id;
+  std::string thumbnailUrl;    // Cover/thumbnail link (thumbnail preferred over full image),
+                               // stored verbatim (query string intact, e.g. &preset=...),
+                               // resolved to an absolute URL by the consumer.
+  std::string series;          // Series/collection name, if advertised
+  std::string summary;         // Short description, truncated at parse time
+  std::string mediaType;       // Acquisition link MIME type (e.g. application/epub+zip)
+  uint64_t fileSizeBytes = 0;  // Acquisition link `length`, 0 if unknown
 };
 
 // Legacy alias for backward compatibility
@@ -45,7 +57,14 @@ using OpdsBook = OpdsEntry;
  */
 class OpdsParser final : public Print {
  public:
-  OpdsParser();
+  // Default cap on collected entries per feed page (excludes the injected
+  // prev/next navigation rows). The parsed entries are moved into the browser and
+  // held for the whole browse session, so this bounds fixed browse-time RAM
+  // (~272 bytes/entry). Callers that need headroom for other work on the same
+  // screen (e.g. decoding cover thumbnails with WiFi up) may pass a smaller cap.
+  static constexpr size_t DEFAULT_MAX_ENTRIES = 62;
+
+  explicit OpdsParser(size_t maxEntries = DEFAULT_MAX_ENTRIES);
   ~OpdsParser();
 
   // Disable copy
@@ -98,6 +117,7 @@ class OpdsParser final : public Print {
   static void appendBounded(std::string& target, const char* value, size_t len, size_t maxLen);
 
   XML_Parser parser = nullptr;
+  size_t maxEntries;  // Cap on collected entries (excludes injected prev/next nav rows)
   std::vector<OpdsEntry> entries;
   OpdsEntry currentEntry;
   std::string currentText;
@@ -108,6 +128,11 @@ class OpdsParser final : public Print {
   bool inAuthor = false;
   bool inAuthorName = false;
   bool inId = false;
+  bool inSummary = false;
+  bool inContent = false;
+  bool inSeries = false;
+  bool inSeriesName = false;
+  bool currentThumbIsThumbnail = false;  // Prefer an explicit thumbnail link over a full-size image
   bool collectCurrentEntry = false;
 
   bool errorOccured = false;

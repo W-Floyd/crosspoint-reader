@@ -3,27 +3,34 @@
 #include <Logging.h>
 #include <XmlParserUtils.h>
 
+#include <cstdlib>
 #include <cstring>
 
 namespace {
-constexpr size_t ENTRY_STORAGE_CAPACITY = 64;
-constexpr size_t MAX_ENTRIES = ENTRY_STORAGE_CAPACITY - 2;
 constexpr size_t MAX_TITLE_CHARS = 160;
 constexpr size_t MAX_AUTHOR_CHARS = 120;
 constexpr size_t MAX_ID_CHARS = 128;
 constexpr size_t MAX_HREF_CHARS = 768;
 constexpr size_t MAX_SEARCH_TEMPLATE_CHARS = 768;
 constexpr size_t MAX_PAGE_URL_CHARS = 768;
+// The browser only ever shows a single truncated line of summary (~50 chars), so
+// a tight cap keeps a full page of entries small in RAM — headroom that matters
+// because covers decode with WiFi up and free heap is already near the JPEG
+// decoder's floor. Do not raise without re-checking on-device heap.
+constexpr size_t MAX_SUMMARY_CHARS = 96;
+constexpr size_t MAX_SERIES_CHARS = 120;
+constexpr size_t MAX_MEDIA_TYPE_CHARS = 64;
 }  // namespace
 
-OpdsParser::OpdsParser() {
+OpdsParser::OpdsParser(size_t maxEntries) : maxEntries(maxEntries) {
   parser = XML_ParserCreate(nullptr);
   if (!parser) {
     errorOccured = true;
     LOG_DBG("OPDS", "Couldn't allocate memory for parser");
     return;
   }
-  entries.reserve(ENTRY_STORAGE_CAPACITY);
+  // +2 leaves room for the browser's injected prev/next navigation rows.
+  entries.reserve(maxEntries + 2);
   XML_SetUserData(parser, this);
   XML_SetElementHandler(parser, startElement, endElement);
   XML_SetCharacterDataHandler(parser, characterData);
@@ -83,6 +90,8 @@ void OpdsParser::clear() {
   currentEntry = OpdsEntry{};
   currentText.clear();
   inEntry = inTitle = inAuthor = inAuthorName = inId = false;
+  inSummary = inContent = inSeries = inSeriesName = false;
+  currentThumbIsThumbnail = false;
   collectCurrentEntry = false;
   feedTruncated = false;
 }
@@ -121,11 +130,13 @@ void XMLCALL OpdsParser::startElement(void* userData, const XML_Char* name, cons
 
   if (strcmp(name, "entry") == 0 || strstr(name, ":entry") != nullptr) {
     self->inEntry = true;
-    self->collectCurrentEntry = self->entries.size() < MAX_ENTRIES;
+    self->collectCurrentEntry = self->entries.size() < self->maxEntries;
     self->feedTruncated = self->feedTruncated || !self->collectCurrentEntry;
     self->currentEntry = OpdsEntry{};
     self->currentText.clear();
     self->inTitle = self->inAuthor = self->inAuthorName = self->inId = false;
+    self->inSummary = self->inContent = self->inSeries = self->inSeriesName = false;
+    self->currentThumbIsThumbnail = false;
     return;
   }
 
@@ -146,6 +157,17 @@ void XMLCALL OpdsParser::startElement(void* userData, const XML_Char* name, cons
       }
 
       if (self->inEntry && self->collectCurrentEntry) {
+        // Cover art: prefer an explicit thumbnail rel; otherwise accept a full-size
+        // image. Stored verbatim (query string intact) so any &preset= survives.
+        const bool isThumbnailRel = rel && strstr(rel, "opds-spec.org/image/thumbnail") != nullptr;
+        const bool isImageRel = rel && strstr(rel, "opds-spec.org/image") != nullptr;
+        if (isThumbnailRel) {
+          assignBounded(self->currentEntry.thumbnailUrl, href, MAX_HREF_CHARS);
+          self->currentThumbIsThumbnail = true;
+        } else if (isImageRel && !self->currentThumbIsThumbnail) {
+          assignBounded(self->currentEntry.thumbnailUrl, href, MAX_HREF_CHARS);
+        }
+
         if (rel && type && strstr(rel, "opds-spec.org/acquisition") != nullptr &&
             strcmp(type, "application/epub+zip") == 0) {
           // Prefer plain EPUB links over derived formats when multiple
@@ -157,6 +179,9 @@ void XMLCALL OpdsParser::startElement(void* userData, const XML_Char* name, cons
           if (self->currentEntry.type != OpdsEntryType::BOOK || (isPlainEpub && !alreadyHasPlainEpub)) {
             self->currentEntry.type = OpdsEntryType::BOOK;
             assignBounded(self->currentEntry.href, href, MAX_HREF_CHARS);
+            assignBounded(self->currentEntry.mediaType, type, MAX_MEDIA_TYPE_CHARS);
+            const char* length = findAttribute(atts, "length");
+            self->currentEntry.fileSizeBytes = length ? strtoull(length, nullptr, 10) : 0;
           }
         } else if (type && strstr(type, "application/atom+xml") != nullptr) {
           if (self->currentEntry.type != OpdsEntryType::BOOK) {
@@ -181,6 +206,23 @@ void XMLCALL OpdsParser::startElement(void* userData, const XML_Char* name, cons
   } else if (strcmp(name, "id") == 0 || strstr(name, ":id") != nullptr) {
     self->inId = true;
     self->currentText.clear();
+  } else if (strcmp(name, "summary") == 0 || strstr(name, ":summary") != nullptr) {
+    self->inSummary = true;
+    self->currentText.clear();
+  } else if (strcmp(name, "content") == 0 || strstr(name, ":content") != nullptr) {
+    self->inContent = true;
+    self->currentText.clear();
+  } else if (strcmp(name, "Series") == 0 || strstr(name, ":Series") != nullptr) {
+    // schema:Series is usually an empty element carrying the name as an attribute
+    // (schema:name / name); some feeds put it in the element text instead.
+    self->inSeries = true;
+    const char* seriesName = findAttribute(atts, "schema:name");
+    if (!seriesName) seriesName = findAttribute(atts, "name");
+    if (seriesName) assignBounded(self->currentEntry.series, seriesName, MAX_SERIES_CHARS);
+    self->currentText.clear();
+  } else if (self->inSeries && (strcmp(name, "name") == 0 || strstr(name, ":name") != nullptr)) {
+    self->inSeriesName = true;
+    self->currentText.clear();
   }
 }
 
@@ -199,12 +241,26 @@ void XMLCALL OpdsParser::endElement(void* userData, const XML_Char* name) {
       self->inTitle = false;
     } else if (strcmp(name, "author") == 0 || strstr(name, ":author") != nullptr) {
       self->inAuthor = false;
+    } else if (self->inSeriesName && (strcmp(name, "name") == 0 || strstr(name, ":name") != nullptr)) {
+      if (self->currentEntry.series.empty()) self->currentEntry.series = self->currentText;
+      self->inSeriesName = false;
     } else if (self->inAuthorName && (strcmp(name, "name") == 0 || strstr(name, ":name") != nullptr)) {
       self->currentEntry.author = self->currentText;
       self->inAuthorName = false;
     } else if (strcmp(name, "id") == 0 || strstr(name, ":id") != nullptr) {
       if (self->inId) self->currentEntry.id = self->currentText;
       self->inId = false;
+    } else if (strcmp(name, "summary") == 0 || strstr(name, ":summary") != nullptr) {
+      if (self->inSummary) self->currentEntry.summary = self->currentText;
+      self->inSummary = false;
+    } else if (strcmp(name, "content") == 0 || strstr(name, ":content") != nullptr) {
+      // Only fall back to <content> when no <summary> was provided.
+      if (self->inContent && self->currentEntry.summary.empty()) self->currentEntry.summary = self->currentText;
+      self->inContent = false;
+    } else if (strcmp(name, "Series") == 0 || strstr(name, ":Series") != nullptr) {
+      if (self->currentEntry.series.empty() && !self->currentText.empty())
+        self->currentEntry.series = self->currentText;
+      self->inSeries = false;
     }
   }
 }
@@ -216,7 +272,11 @@ void XMLCALL OpdsParser::characterData(void* userData, const XML_Char* s, const 
     appendBounded(self->currentText, s, len, MAX_TITLE_CHARS);
   } else if (self->inAuthorName) {
     appendBounded(self->currentText, s, len, MAX_AUTHOR_CHARS);
+  } else if (self->inSeriesName) {
+    appendBounded(self->currentText, s, len, MAX_SERIES_CHARS);
   } else if (self->inId) {
     appendBounded(self->currentText, s, len, MAX_ID_CHARS);
+  } else if (self->inSummary || self->inContent) {
+    appendBounded(self->currentText, s, len, MAX_SUMMARY_CHARS);
   }
 }
