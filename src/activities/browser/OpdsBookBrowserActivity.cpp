@@ -16,6 +16,8 @@
 #include "activities/network/WifiSelectionActivity.h"
 #include "activities/util/KeyboardEntryActivity.h"
 #include "components/UITheme.h"
+#include "components/icons/book24.h"
+#include "components/icons/folder24.h"
 #include "fontIds.h"
 #include "network/HttpDownloader.h"
 #include "network/OpdsCoverCache.h"
@@ -43,6 +45,7 @@ constexpr int RICH_META_LINES = 2;  // Metadata lines below the title (format+au
 // than their reported line height, so plain line-height stacking packs them too
 // tightly; this keeps the lines (notably the format footer) clearly separated.
 constexpr int RICH_LINE_GAP = 4;
+constexpr int ICON_SIZE = 24;  // Placeholder icon assets are 24x24 (drawIcon does not scale)
 
 constexpr int DOWNLOAD_PROGRESS_STEP_PERCENT = 5;
 constexpr unsigned long DOWNLOAD_PROGRESS_MIN_UPDATE_MS = 5000;
@@ -375,14 +378,14 @@ void OpdsBookBrowserActivity::renderRichRow(int entryIndex, int rowY, int rowHei
     }
   }
   if (!coverDrawn) {
-    // Placeholder box (pending cover, no cover, or navigation entry).
+    // Placeholder box (pending cover, no cover, or navigation entry) with a
+    // centered icon: folder for navigation, book for a book. drawIcon only inks
+    // black, so skip it on an inverted (dark-highlight) row — the box still shows.
     renderer.drawRect(thumbX, thumbY, thumbW, thumbH, !invert);
-    const char* glyph = (entry.type == OpdsEntryType::NAVIGATION) ? ">" : "?";
-    const int glyphW = renderer.getTextWidth(UI_12_FONT_ID, glyph);
-    const int glyphX = thumbX + (thumbW - glyphW) / 2;
-    // drawText's y is the line-box top; center the single line within the box.
-    const int glyphTop = thumbY + (thumbH - renderer.getLineHeight(UI_12_FONT_ID)) / 2;
-    renderer.drawText(UI_12_FONT_ID, glyphX, glyphTop, glyph, !invert);
+    if (!invert) {
+      const uint8_t* icon = (entry.type == OpdsEntryType::NAVIGATION) ? Folder24Icon : Book24Icon;
+      renderer.drawIcon(icon, thumbX + (thumbW - ICON_SIZE) / 2, thumbY + (thumbH - ICON_SIZE) / 2, ICON_SIZE);
+    }
   }
 
   // "Already on the SD card" badge in the thumbnail's top-right corner.

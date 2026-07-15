@@ -17,6 +17,7 @@
 #include "RecentBooksStore.h"
 #include "activities/util/ConfirmationActivity.h"
 #include "components/UITheme.h"
+#include "components/icons/book24.h"
 #include "fontIds.h"
 
 namespace {
@@ -29,6 +30,7 @@ constexpr int CARD_PAD = 6;
 constexpr int CARD_SIDE = 12;      // Left/right row margin
 constexpr int CARD_TEXT_GAP = 12;  // Gap between cover and text column
 constexpr int CARD_LINE_GAP = 4;   // Extra per-line spacing (UI fonts render tall)
+constexpr int ICON_SIZE = 24;      // Placeholder icon assets are 24x24 (drawIcon does not scale)
 
 // Uppercase file extension as a format label, e.g. "/book.epub" -> "EPUB".
 std::string formatFromPath(const std::string& path) {
@@ -159,7 +161,12 @@ void RecentBooksActivity::renderCard(int index, int rowY, int rowH, bool selecte
     }
   }
   if (!coverDrawn) {
-    renderer.drawRect(thumbX, thumbY, tw, th, !invert);  // placeholder box (TXT / no cover)
+    // Placeholder box with a centered book icon (TXT / no cover). drawIcon only
+    // inks black, so skip it on an inverted (dark-highlight) row; the box remains.
+    renderer.drawRect(thumbX, thumbY, tw, th, !invert);
+    if (!invert) {
+      renderer.drawIcon(Book24Icon, thumbX + (tw - ICON_SIZE) / 2, thumbY + (th - ICON_SIZE) / 2, ICON_SIZE);
+    }
   }
 
   const int textX = thumbX + tw + CARD_TEXT_GAP;
