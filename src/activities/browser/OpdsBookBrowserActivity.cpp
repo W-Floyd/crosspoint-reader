@@ -764,7 +764,13 @@ void OpdsBookBrowserActivity::promptBulkDownload() {
     pages++;
   }
 
+  // These branches return straight to a Confirm-sensitive state (ERROR/BULK_DONE)
+  // without an intervening sub-activity. The long-press Confirm is still physically
+  // held, so swallow its pending release; otherwise it immediately dismisses BULK_DONE
+  // or re-fetches from ERROR. (The count>0 path routes through ConfirmationActivity,
+  // which reads Left/Right, so it needs no guard.)
   if (firstFetchFailed) {
+    consumeConfirm = true;
     state = BrowserState::ERROR;
     errorMessage = tr(STR_FETCH_FEED_FAILED);
     requestUpdate();
@@ -772,6 +778,7 @@ void OpdsBookBrowserActivity::promptBulkDownload() {
   }
 
   if (count == 0) {
+    consumeConfirm = true;
     bulkSummary = tr(STR_OPDS_NO_NEW_BOOKS);
     state = BrowserState::BULK_DONE;
     requestUpdate();
