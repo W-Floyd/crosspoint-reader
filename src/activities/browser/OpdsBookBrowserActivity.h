@@ -100,7 +100,8 @@ class OpdsBookBrowserActivity final : public Activity {
   bool fetchFeedPage(const std::string& pageUrl, std::vector<OpdsEntry>& outEntries, std::string& outNextPageUrl);
   void promptBulkDownload();  // Scan the feed's pages for missing books, then confirm the count
   void runBulkDownload();     // Download every not-yet-present book across the feed's pages, with cancel
-  std::string localFilename(const OpdsEntry& book) const;         // SD path the downloader writes to
+  std::string localFilename(const OpdsEntry& book) const;         // Intended on-SD path (pure; for badges/existence)
+  std::string resolveDownloadPath(const OpdsEntry& book);         // localFilename + create download folder (write path)
   void drawCheck(int x, int y, int size, bool state);             // Bare checkmark (two strokes) within a size box
   void drawDownloadedBadge(int x, int y, int size, bool invert);  // Chip + check for the cover corner
   void launchSearch();

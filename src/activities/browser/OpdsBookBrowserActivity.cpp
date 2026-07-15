@@ -4,6 +4,7 @@
 #include <Bitmap.h>
 #include <CrossPointSettings.h>
 #include <GfxRenderer.h>
+#include <HalStorage.h>
 #include <I18n.h>
 #include <Logging.h>
 #include <OpdsStream.h>
@@ -23,7 +24,7 @@
 #include "network/HttpDownloader.h"
 #include "network/OpdsCoverCache.h"
 #include "util/BookCacheUtils.h"
-#include "util/StringUtils.h"
+#include "util/OpdsFilename.h"
 #include "util/UrlUtils.h"
 
 namespace {
@@ -617,7 +618,35 @@ void OpdsBookBrowserActivity::navigateBack() {
 }
 
 std::string OpdsBookBrowserActivity::localFilename(const OpdsEntry& book) const {
-  return "/" + StringUtils::sanitizeFilename((book.author.empty() ? "" : book.author + " - ") + book.title) + ".epub";
+  // Pure: the intended on-SD path for a book (configured download folder +
+  // formatted, sanitized filename). Used for existence checks and the downloaded
+  // badge, so it must match where resolveDownloadPath() actually writes. No I/O.
+  const char* folder = SETTINGS.opdsDownloadFolder;  // "" => SD root
+  std::string path;
+  path.reserve(96);
+  if (folder[0] != '\0') path += folder;
+  path += '/';
+  path += opdsBookFilename(book.author, book.title, static_cast<OpdsFilenameFormat>(SETTINGS.opdsFilenameFormat));
+  return path;
+}
+
+std::string OpdsBookBrowserActivity::resolveDownloadPath(const OpdsEntry& book) {
+  // Same path as localFilename(), but creates the configured download folder if
+  // needed, falling back to the SD root when it can't be created so a download is
+  // never lost. May do I/O — call at download time, not for badge/existence checks.
+  const char* folder = SETTINGS.opdsDownloadFolder;  // "" => SD root
+  bool haveFolder = folder[0] != '\0';
+  if (haveFolder && !Storage.exists(folder) && !Storage.mkdir(folder)) {
+    // exists()-guard first: mkdir's return-on-existing is unconfirmed.
+    LOG_ERR("OPDS", "mkdir failed for %s, using SD root", folder);
+    haveFolder = false;
+  }
+  std::string path;
+  path.reserve(96);
+  if (haveFolder) path += folder;
+  path += '/';
+  path += opdsBookFilename(book.author, book.title, static_cast<OpdsFilenameFormat>(SETTINGS.opdsFilenameFormat));
+  return path;
 }
 
 void OpdsBookBrowserActivity::drawCheck(int x, int y, int size, bool state) {
@@ -646,7 +675,7 @@ void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& book) {
   // Build full download URL relative to the current feed, not the root server URL
   const std::string feedUrl = UrlUtils::buildUrl(server.url, currentPath);
   std::string downloadUrl = UrlUtils::buildUrl(feedUrl, book.href);
-  std::string filename = localFilename(book);
+  std::string filename = resolveDownloadPath(book);
   LOG_DBG("OPDS", "Downloading: %s -> %s", downloadUrl.c_str(), filename.c_str());
 
   int lastRenderedPercent = -1;
@@ -793,7 +822,9 @@ void OpdsBookBrowserActivity::runBulkDownload() {
     for (const auto& e : pageEntries) {
       if (bulkCancel) break;
       if (e.type != OpdsEntryType::BOOK) continue;
-      const std::string dest = localFilename(e);
+      // resolveDownloadPath() (not localFilename) so the write and skip check use
+      // the same path the folder-fallback would pick, and the folder is created.
+      const std::string dest = resolveDownloadPath(e);
       if (Storage.exists(dest.c_str())) continue;  // already present, or grabbed earlier this run
 
       bulkCurrentIndex++;
