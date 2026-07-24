@@ -475,6 +475,33 @@ void loop() {
         logSerial.write(buf, bufferSize);
         logSerial.printf("SCREENSHOT_END\n");
       }
+#ifdef INPUT_INJECTION
+      // Synthetic button injection for host-driven UI tests (e.g. the dictionary
+      // soak). Verb:NAME where NAME is a logical button (CONFIRM/BACK/LEFT/RIGHT,
+      // remap-aware) or a fixed one (UP/DOWN/POWER). PRESS/RELEASE let the host
+      // time a hold; TAP is a self-releasing press. Dev-only (INPUT_INJECTION).
+      else if (cmd.startsWith("PRESS:") || cmd.startsWith("RELEASE:") || cmd.startsWith("TAP:")) {
+        const int colon = cmd.indexOf(':');
+        const String verb = cmd.substring(0, colon);
+        const String name = cmd.substring(colon + 1);
+        int idx = -1;
+        if (name == "CONFIRM") idx = mappedInputManager.physicalIndex(MappedInputManager::Button::Confirm);
+        else if (name == "BACK") idx = mappedInputManager.physicalIndex(MappedInputManager::Button::Back);
+        else if (name == "LEFT") idx = mappedInputManager.physicalIndex(MappedInputManager::Button::Left);
+        else if (name == "RIGHT") idx = mappedInputManager.physicalIndex(MappedInputManager::Button::Right);
+        else if (name == "UP") idx = HalGPIO::BTN_UP;
+        else if (name == "DOWN") idx = HalGPIO::BTN_DOWN;
+        else if (name == "POWER") idx = HalGPIO::BTN_POWER;
+        if (idx < 0) {
+          logSerial.printf("CMD_ERR:bad button '%s'\n", name.c_str());
+        } else {
+          if (verb == "PRESS") gpio.injectPress(static_cast<uint8_t>(idx));
+          else if (verb == "RELEASE") gpio.injectRelease(static_cast<uint8_t>(idx));
+          else gpio.injectTap(static_cast<uint8_t>(idx));
+          logSerial.printf("CMD_OK:%s:%s(%d)\n", verb.c_str(), name.c_str(), idx);
+        }
+      }
+#endif
     }
   }
 

@@ -210,6 +210,16 @@ void HalGPIO::begin() {
 
 void HalGPIO::update() {
   inputMgr.update();
+#ifdef INPUT_INJECTION
+  for (uint8_t i = 0; i < NUM_INJECT_BTNS; i++) {
+    // TAP auto-release: hold for a few frames so an edge pair is observable.
+    if (synthTapFrames_[i] > 0 && --synthTapFrames_[i] == 0) synthLevel_[i] = false;
+    synthPress_[i] = synthLevel_[i] && !synthPrev_[i];
+    synthRelease_[i] = !synthLevel_[i] && synthPrev_[i];
+    if (synthPress_[i]) synthPressAt_[i] = millis();
+    synthPrev_[i] = synthLevel_[i];
+  }
+#endif
   const bool connected = isUsbConnected();
   usbStateChanged = (connected != lastUsbConnected);
   lastUsbConnected = connected;
@@ -217,17 +227,76 @@ void HalGPIO::update() {
 
 bool HalGPIO::wasUsbStateChanged() const { return usbStateChanged; }
 
-bool HalGPIO::isPressed(uint8_t buttonIndex) const { return inputMgr.isPressed(buttonIndex); }
+#ifdef INPUT_INJECTION
+void HalGPIO::injectPress(uint8_t buttonIndex) {
+  if (buttonIndex < NUM_INJECT_BTNS) synthLevel_[buttonIndex] = true;
+}
+void HalGPIO::injectRelease(uint8_t buttonIndex) {
+  if (buttonIndex < NUM_INJECT_BTNS) synthLevel_[buttonIndex] = false;
+}
+void HalGPIO::injectTap(uint8_t buttonIndex) {
+  if (buttonIndex < NUM_INJECT_BTNS) {
+    synthLevel_[buttonIndex] = true;
+    synthTapFrames_[buttonIndex] = 4;
+  }
+}
+#endif
 
-bool HalGPIO::wasPressed(uint8_t buttonIndex) const { return inputMgr.wasPressed(buttonIndex); }
+bool HalGPIO::isPressed(uint8_t buttonIndex) const {
+  bool v = inputMgr.isPressed(buttonIndex);
+#ifdef INPUT_INJECTION
+  if (buttonIndex < NUM_INJECT_BTNS) v = v || synthLevel_[buttonIndex];
+#endif
+  return v;
+}
 
-bool HalGPIO::wasAnyPressed() const { return inputMgr.wasAnyPressed(); }
+bool HalGPIO::wasPressed(uint8_t buttonIndex) const {
+  bool v = inputMgr.wasPressed(buttonIndex);
+#ifdef INPUT_INJECTION
+  if (buttonIndex < NUM_INJECT_BTNS) v = v || synthPress_[buttonIndex];
+#endif
+  return v;
+}
 
-bool HalGPIO::wasReleased(uint8_t buttonIndex) const { return inputMgr.wasReleased(buttonIndex); }
+bool HalGPIO::wasAnyPressed() const {
+  bool v = inputMgr.wasAnyPressed();
+#ifdef INPUT_INJECTION
+  for (uint8_t i = 0; i < NUM_INJECT_BTNS; i++) v = v || synthPress_[i];
+#endif
+  return v;
+}
 
-bool HalGPIO::wasAnyReleased() const { return inputMgr.wasAnyReleased(); }
+bool HalGPIO::wasReleased(uint8_t buttonIndex) const {
+  bool v = inputMgr.wasReleased(buttonIndex);
+#ifdef INPUT_INJECTION
+  if (buttonIndex < NUM_INJECT_BTNS) v = v || synthRelease_[buttonIndex];
+#endif
+  return v;
+}
 
-unsigned long HalGPIO::getHeldTime() const { return inputMgr.getHeldTime(); }
+bool HalGPIO::wasAnyReleased() const {
+  bool v = inputMgr.wasAnyReleased();
+#ifdef INPUT_INJECTION
+  for (uint8_t i = 0; i < NUM_INJECT_BTNS; i++) v = v || synthRelease_[i];
+#endif
+  return v;
+}
+
+unsigned long HalGPIO::getHeldTime() const {
+#ifdef INPUT_INJECTION
+  unsigned long best = 0;
+  bool anySynth = false;
+  for (uint8_t i = 0; i < NUM_INJECT_BTNS; i++) {
+    if (synthLevel_[i]) {
+      anySynth = true;
+      const unsigned long h = millis() - synthPressAt_[i];
+      if (h > best) best = h;
+    }
+  }
+  if (anySynth) return best;
+#endif
+  return inputMgr.getHeldTime();
+}
 
 unsigned long HalGPIO::getPowerButtonHeldTime() const { return inputMgr.getPowerButtonHeldTime(); }
 

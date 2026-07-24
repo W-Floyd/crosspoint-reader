@@ -1,7 +1,9 @@
 #include "DictionaryWordSelectActivity.h"
 
+#include <Arduino.h>
 #include <FontCacheManager.h>
 #include <GfxRenderer.h>
+#include <Logging.h>
 #include <Memory.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -163,7 +165,16 @@ void DictionaryWordSelectActivity::performLookup() {
 
   std::string definition;
   std::string headword;
-  const bool found = ok && dict.lookup(words[selected].text, definition, headword);
+  // Heap snapshot at lookup time. readDefinition refuses when the largest free
+  // block is below (definitionSize + 8KB) and returns not-found silently, so if
+  // the dictionary "stops finding words" mid-session, watch largestBlock here:
+  // largestBlock tiny while heapFree is still large == fragmentation.
+  const char* lookupWord = words[selected].text;
+  const uint32_t heapFree = ESP.getFreeHeap();
+  const uint32_t largestBlock = ESP.getMaxAllocHeap();
+  const bool found = ok && dict.lookup(lookupWord, definition, headword);
+  LOG_DBG("DICT", "lookup '%s': ok=%d found=%d heapFree=%u largestBlock=%u", lookupWord ? lookupWord : "", ok, found,
+          static_cast<unsigned>(heapFree), static_cast<unsigned>(largestBlock));
 
   if (found) {
     popup = Popup::None;

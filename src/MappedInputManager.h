@@ -55,6 +55,11 @@ class MappedInputManager {
   // Returns the raw front button index that was pressed this frame (or -1 if none).
   int getPressedFrontButton() const;
 
+  // Physical HalGPIO button index a logical button currently maps to (honouring
+  // the user's front-button remap), or -1 if it has no single index. Used by the
+  // serial input-injection test hook to drive logical buttons regardless of remap.
+  int physicalIndex(Button button) const;
+
   // True when the control axis is flipped relative to the physical buttons: the user opted into
   // orientation-following front buttons AND the screen is *currently rendered* rotated (INVERTED /
   // LANDSCAPE_CCW). Keyed on the live renderer orientation rather than the persisted reader setting,

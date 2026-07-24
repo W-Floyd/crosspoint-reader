@@ -284,6 +284,27 @@ bool MappedInputManager::wasReleased(const Button button) const {
 
 bool MappedInputManager::isPressed(const Button button) const { return mapButton(button, &HalGPIO::isPressed); }
 
+int MappedInputManager::physicalIndex(const Button button) const {
+  switch (button) {
+    case Button::Back:
+      return SETTINGS.frontButtonBack;
+    case Button::Confirm:
+      return SETTINGS.frontButtonConfirm;
+    case Button::Left:
+      return SETTINGS.frontButtonLeft;
+    case Button::Right:
+      return SETTINGS.frontButtonRight;
+    case Button::Up:
+      return HalGPIO::BTN_UP;
+    case Button::Down:
+      return HalGPIO::BTN_DOWN;
+    case Button::Power:
+      return HalGPIO::BTN_POWER;
+    default:
+      return -1;  // PageBack/PageForward/Nav* depend on layout; drive Up/Down directly
+  }
+}
+
 bool MappedInputManager::wasAnyPressed() const { return gpio.wasAnyPressed(); }
 
 bool MappedInputManager::wasAnyReleased() const { return gpio.wasAnyReleased(); }

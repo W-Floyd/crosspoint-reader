@@ -46,6 +46,18 @@ class HalGPIO {
   bool lastUsbConnected = false;
   bool usbStateChanged = false;
 
+#ifdef INPUT_INJECTION
+  // Test-only synthetic button state, overlaid on the real InputManager so a
+  // serial CMD can drive the UI. Never compiled into release builds.
+  static constexpr uint8_t NUM_INJECT_BTNS = 7;
+  bool synthLevel_[NUM_INJECT_BTNS] = {};    // currently-held (level)
+  bool synthPrev_[NUM_INJECT_BTNS] = {};     // level at previous update()
+  bool synthPress_[NUM_INJECT_BTNS] = {};    // rising edge this frame
+  bool synthRelease_[NUM_INJECT_BTNS] = {};  // falling edge this frame
+  unsigned long synthPressAt_[NUM_INJECT_BTNS] = {};
+  uint16_t synthTapFrames_[NUM_INJECT_BTNS] = {};  // auto-release countdown for TAP
+#endif
+
  public:
   enum class DeviceType : uint8_t { X4, X3 };
 
@@ -72,6 +84,15 @@ class HalGPIO {
   bool wasAnyReleased() const;
   unsigned long getHeldTime() const;
   unsigned long getPowerButtonHeldTime() const;
+
+#ifdef INPUT_INJECTION
+  // Test-only synthetic button injection (serial CMD:PRESS/RELEASE/TAP). Drives
+  // the real activities as if the physical button were used. Excluded from
+  // release builds via the INPUT_INJECTION gate.
+  void injectPress(uint8_t buttonIndex);
+  void injectRelease(uint8_t buttonIndex);
+  void injectTap(uint8_t buttonIndex);  // press, auto-release after a few frames
+#endif
   bool hasTouch() const;
   bool wasTouchTap(float& nx, float& ny) const;
   bool wasTouchDown(float& nx, float& ny) const;
