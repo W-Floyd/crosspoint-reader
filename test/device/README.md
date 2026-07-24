@@ -29,6 +29,18 @@ script drives repeated lookups and records the heap until words stop resolving.
 pio run -e default -t upload      # default env defines INPUT_INJECTION
 ```
 
+### Hunting the fragmentation (heaptrace build)
+
+```bash
+pio run -e heaptrace -t upload    # default + render-path heap tracing
+```
+
+Adds `[HEAPT] <label> free=.. largest=..` serial lines at
+`render:enter` / `storeBwBuffer:before|after` / `restoreBwBuffer:after-free` /
+`render:done`. Drive a session (below) and watch **`largest`** across pages: if
+it ratchets down while `free` stays high, that's the fragmentation — the label
+whose `largest` never recovers is the culprit step.
+
 ## Device prerequisites (set once, by hand)
 
 - A book is open in the reader.

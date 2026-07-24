@@ -2105,6 +2105,7 @@ void GfxRenderer::freeBwBufferChunks() {
  * Returns true if buffer was stored successfully, false if allocation failed.
  */
 bool GfxRenderer::storeBwBuffer() {
+  HEAP_TRACE_LOG("storeBwBuffer:before");
   // Allocate and copy each chunk
   for (size_t i = 0; i < bwBufferChunks.size(); i++) {
     // Check if any chunks are already allocated
@@ -2129,6 +2130,7 @@ bool GfxRenderer::storeBwBuffer() {
   }
 
   LOG_DBG("GFX", "Stored BW buffer in %zu chunks (%zu bytes each)", bwBufferChunks.size(), BW_BUFFER_CHUNK_SIZE);
+  HEAP_TRACE_LOG("storeBwBuffer:after");
   return true;
 }
 
@@ -2162,6 +2164,7 @@ void GfxRenderer::restoreBwBuffer() {
 
   freeBwBufferChunks();
   LOG_DBG("GFX", "Restored and freed BW buffer chunks");
+  HEAP_TRACE_LOG("restoreBwBuffer:after-free");
 }
 
 /**

@@ -65,6 +65,19 @@ void logPrintf(const char* level, const char* origin, const char* format, ...);
 #define LOG_INF(origin, format, ...)
 #endif
 
+// Render-path heap tracing to pinpoint fragmentation. Enable with -DHEAP_TRACE=1
+// (the `heaptrace` env). Logs total free + largest contiguous block at a labelled
+// point, so a device session shows which step ratchets the largest block down
+// (total free stays ~stable while largest shrinks == fragmentation). Off (and
+// zero-cost) in every normal build.
+#ifdef HEAP_TRACE
+#define HEAP_TRACE_LOG(label) \
+  logPrintf("INF", "HEAPT", "%s free=%u largest=%u\n", label, static_cast<unsigned>(ESP.getFreeHeap()), \
+            static_cast<unsigned>(ESP.getMaxAllocHeap()))
+#else
+#define HEAP_TRACE_LOG(label) ((void)0)
+#endif
+
 std::string getLastLogs();
 void clearLastLogs();
 // Validates the RTC log state (magic word + logHead range). Returns true if
