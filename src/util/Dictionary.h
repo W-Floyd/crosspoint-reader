@@ -35,16 +35,30 @@ class Dictionary {
   // so the UI can show an "Indexing…" message for the slow first pass.
   bool needsIndex();
 
-  // Progress callback for the long build phases: (ctx, bytesDone, bytesTotal).
+  // Progress callback for long operations: (ctx, bytesDone, bytesTotal).
   using ProgressFn = void (*)(void* ctx, uint32_t done, uint32_t total);
 
-  // Build the sidecars: the .qidx over .idx, the .sidx over .syn (if present),
-  // and — for a compressed .dict.dz with no plain .dict — a fully decompressed
-  // <stem>.ddec so lookups read definitions directly (no per-entry 32KB inflate
-  // window, which fails under heap fragmentation). yieldFn (optional) is called
-  // every ~64KB during the index scan to feed the watchdog; progressFn
-  // (optional) reports the .ddec decompression for a real progress bar.
-  bool buildIndex(void (*yieldFn)(void*) = nullptr, void* ctx = nullptr, ProgressFn progressFn = nullptr);
+  // Build the fast-lookup sidecars: the .qidx over .idx and the .sidx over .syn
+  // (if present). Quick (a few seconds); yieldFn (optional) is called every
+  // ~64KB during the scan to feed the watchdog. Does NOT decompress a .dict.dz
+  // — that is the separate, much slower buildDecompressedSidecar() below.
+  bool buildIndex(void (*yieldFn)(void*) = nullptr, void* ctx = nullptr);
+
+  // True when this is a compressed-only dictionary (a .dict.dz with no plain
+  // .dict) — the case that benefits from a decompressed .ddec sidecar.
+  bool usesCompressedDict() const { return isOpen() && !hasPlainDict; }
+  // True when a valid decompressed .ddec sidecar is present (lookups read it
+  // directly, avoiding the per-entry inflate window).
+  bool hasDecompressedSidecar() const { return hasDecompressedDict; }
+
+  // Decompress a compressed-only .dict.dz once to its plain <stem>.ddec sidecar,
+  // so subsequent lookups read definitions directly — no per-entry 32KB inflate
+  // window, which can fail under heap fragmentation and make lookups silently
+  // stop finding words. Slow (tens of seconds); progressFn (optional) reports
+  // bytes decompressed for a progress bar. No-op returning true if a valid .ddec
+  // already exists or the dictionary is already a plain .dict. Triggered
+  // explicitly from settings, never from a lookup.
+  bool buildDecompressedSidecar(ProgressFn progressFn = nullptr, void* ctx = nullptr);
 
   // Clean the word, look it up, and on a miss retry mini stem variants
   // (-'s/-s/-es/-ies/-ed/-ing). On a hit fills the definition text (capped at

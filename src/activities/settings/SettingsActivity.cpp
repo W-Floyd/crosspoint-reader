@@ -10,6 +10,7 @@
 
 #include "ButtonRemapActivity.h"
 #include "ClearCacheActivity.h"
+#include "DictionaryDecompressActivity.h"
 #include "CrossPointSettings.h"
 #include "FontDownloadActivity.h"
 #include "KOReaderSettingsActivity.h"
@@ -408,6 +409,9 @@ void SettingsActivity::toggleCurrentSetting() {
         break;
       case SettingAction::Language:
         startActivityForResult(std::make_unique<LanguageSelectActivity>(renderer, mappedInput), resultHandler);
+        break;
+      case SettingAction::DecompressDictionary:
+        startActivityForResult(std::make_unique<DictionaryDecompressActivity>(renderer, mappedInput), resultHandler);
         break;
       case SettingAction::None:
         // Do nothing

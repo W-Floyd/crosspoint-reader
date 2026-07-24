@@ -26,11 +26,6 @@ class DictionaryWordSelectActivity final : public Activity {
   void loop() override;
   void render(RenderLock&&) override;
 
-  // Draw a throttled progress bar during the one-time dictionary build
-  // (decompressing a .dict.dz to its .ddec sidecar). Called from buildIndex via
-  // a C trampoline; public for that trampoline. Self-throttles for e-ink.
-  void onIndexProgress(uint32_t done, uint32_t total);
-
  private:
   // Screen box of one selectable word. `text` points into the owned Page's
   // TextBlock arena (NUL-terminated), valid for this activity's lifetime.
@@ -88,7 +83,4 @@ class DictionaryWordSelectActivity final : public Activity {
   // The activity is entered while Confirm is still held (long-press trigger):
   // ignore the stale release until a fresh press is seen.
   bool confirmPressSeen = false;
-
-  // Last time the build progress bar was repainted, to throttle e-ink refreshes.
-  unsigned long lastProgressDrawMs = 0;
 };

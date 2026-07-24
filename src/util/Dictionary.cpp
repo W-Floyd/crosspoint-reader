@@ -141,19 +141,13 @@ bool Dictionary::decompressedSidecarValid() {
 bool Dictionary::needsIndex() {
   if (!isOpen()) return false;
   if (sidecarIsStale(basePath + ".idx", basePath + ".qidx", QIDX_MAGIC)) return true;
-  if (hasSyn && sidecarIsStale(basePath + ".syn", basePath + ".sidx", SIDX_MAGIC)) return true;
-  // A .dict.dz with no plain .dict needs its decompressed .ddec sidecar built so
-  // lookups avoid the fragmentation-prone per-entry inflate window. Only demand
-  // it when the .dz is parseable (expected != 0); otherwise there's nothing to
-  // build and the per-lookup dictzip fallback still applies.
-  if (!hasPlainDict) {
-    const uint32_t expected = dzUncompressedSize();
-    if (expected != 0 && !decompressedSidecarValid()) return true;
-  }
-  return false;
+  return hasSyn && sidecarIsStale(basePath + ".syn", basePath + ".sidx", SIDX_MAGIC);
+  // Note: the decompressed .ddec sidecar is NOT required here — a .dict.dz still
+  // works via per-lookup inflate. Building .ddec is slow, so it's an explicit
+  // opt-in (buildDecompressedSidecar, from settings), not a lookup-time cost.
 }
 
-bool Dictionary::buildIndex(void (*yieldFn)(void*), void* ctx, ProgressFn progressFn) {
+bool Dictionary::buildIndex(void (*yieldFn)(void*), void* ctx) {
   if (!isOpen()) return false;
 
   // The .idx sidecar is mandatory — lookups binary-search it. Rebuild only when
@@ -174,32 +168,37 @@ bool Dictionary::buildIndex(void (*yieldFn)(void*), void* ctx, ProgressFn progre
     LOG_ERR("DICT", "Synonym index build failed; synonyms disabled for %s", basePath.c_str());
     hasSyn = false;
   }
+  return true;
+}
 
-  // For a compressed-only dictionary (.dict.dz, no plain .dict), decompress it
-  // once to a plain <stem>.ddec sidecar. Lookups then read definitions directly
-  // by uncompressed offset — no per-entry 32KB inflate window, which is what
-  // fails under heap fragmentation ("stopped finding words"). Best-effort: on
-  // failure the per-lookup dictzip fallback still works, and needsIndex() keeps
-  // it stale so the next open() retries.
-  if (!hasPlainDict && !hasDecompressedDict && dzUncompressedSize() != 0) {
-    const std::string ddecPath = basePath + ".ddec";
-    bool ddecOk = false;
-    {
-      HalFile out;
-      if (Storage.openFileForWrite("DICT", ddecPath, out)) {
-        ddecOk = DictZip::decompressToFile((basePath + ".dict.dz").c_str(), out, progressFn, ctx);
-        out.close();  // close before validate/remove of the same path
-      }
-    }
-    if (ddecOk && decompressedSidecarValid()) {
-      hasDecompressedDict = true;
-      LOG_INF("DICT", "Built decompressed dictionary sidecar for %s", basePath.c_str());
-    } else {
-      Storage.remove(ddecPath.c_str());
-      LOG_ERR("DICT", "Decompressed sidecar build failed; per-lookup dictzip fallback for %s", basePath.c_str());
+bool Dictionary::buildDecompressedSidecar(ProgressFn progressFn, void* ctx) {
+  if (!isOpen()) return false;
+  if (hasPlainDict) return true;         // already a plain .dict — nothing to do
+  if (hasDecompressedDict) return true;  // valid .ddec already present
+  if (dzUncompressedSize() == 0) return false;  // no parseable .dict.dz
+
+  // Decompress the whole .dict.dz once to a plain <stem>.ddec sidecar. Lookups
+  // then read definitions directly by uncompressed offset — no per-entry 32KB
+  // inflate window, which is what fails under heap fragmentation ("stopped
+  // finding words"). Best-effort: on failure the per-lookup dictzip fallback
+  // still works.
+  const std::string ddecPath = basePath + ".ddec";
+  bool ddecOk = false;
+  {
+    HalFile out;
+    if (Storage.openFileForWrite("DICT", ddecPath, out)) {
+      ddecOk = DictZip::decompressToFile((basePath + ".dict.dz").c_str(), out, progressFn, ctx);
+      out.close();  // close before validate/remove of the same path
     }
   }
-  return true;
+  if (ddecOk && decompressedSidecarValid()) {
+    hasDecompressedDict = true;
+    LOG_INF("DICT", "Built decompressed dictionary sidecar for %s", basePath.c_str());
+    return true;
+  }
+  Storage.remove(ddecPath.c_str());
+  LOG_ERR("DICT", "Decompressed sidecar build failed for %s", basePath.c_str());
+  return false;
 }
 
 bool Dictionary::buildSidecar(const std::string& sourcePath, const std::string& sidecarPath, uint32_t magic,

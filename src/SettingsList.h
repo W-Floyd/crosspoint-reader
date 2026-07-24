@@ -384,7 +384,13 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
     // Insert at the end of the Reader category (just before the first Controls entry).
     auto it =
         std::find_if(v.begin(), v.end(), [](const SettingInfo& s) { return s.category == StrId::STR_CAT_CONTROLS; });
-    v.insert(it, buildDictionarySetting(*dictionaries));
+    it = v.insert(it, buildDictionarySetting(*dictionaries));
+    // "Decompress dictionary" action right below the picker: converts a
+    // compressed .dict.dz to a plain .ddec so lookups can't run out of the
+    // contiguous heap the on-the-fly inflate needs. No-op if already plain/done.
+    SettingInfo decompress = SettingInfo::Action(StrId::STR_DICT_DECOMPRESS, SettingAction::DecompressDictionary);
+    decompress.category = StrId::STR_CAT_READER;
+    v.insert(it + 1, decompress);
   }
   return v;
 }
