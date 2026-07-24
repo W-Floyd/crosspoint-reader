@@ -9,7 +9,7 @@ The reader supports **StarDict** dictionaries. When searching for dictionaries o
 A dictionary folder must contain:
 
 - `.idx` — word index (required, **must be uncompressed** — a `.idx.gz` will not work; decompress it on your computer with `gzip -d` first)
-- `.dict` or `.dict.dz` — definition data (`.dict.dz` is supported as-is; entries are decompressed on the fly during lookup)
+- `.dict` or `.dict.dz` — definition data. A plain `.dict` is read directly and is the most robust choice; if you have only a compressed `.dict.dz`, you can decompress it on your computer (`gzip -dc x.dict.dz > x.dict`) and drop the `.dict` in next to the `.idx`. A `.dict.dz` also works on its own: on first load the reader decompresses it once to a `.ddec` sidecar (with a progress bar) and reads from that afterwards, so lookups never inflate on the fly. (Inflating a definition on the fly needs a ~32 KB contiguous buffer that can be unavailable once a long reading session has fragmented the heap — which would make lookups quietly stop finding words until a restart; the `.ddec` sidecar avoids that.)
 - `.syn` — synonym index (optional; maps alternate spellings and irregular forms to their headword)
 - `.ifo` — metadata (optional)
 
@@ -36,7 +36,7 @@ One word on the page becomes highlighted:
 2. Press **Confirm** to look up the highlighted word.
 3. Press **Back** to return to the reader.
 
-On the very first lookup with a dictionary (and again whenever the `.idx` or `.syn` source file changes), the reader shows *"Indexing dictionary…"* while it builds small sidecar files next to them — a `.qidx` for the word index, and a `.sidx` when a `.syn` synonym file is present. Each sidecar is rebuilt independently, only when its own source changes. This takes a few seconds for large dictionaries and makes all subsequent lookups fast. The sidecars can be deleted safely at any time — they will simply be rebuilt.
+On the very first lookup with a dictionary (and again whenever a source file changes), the reader shows *"Indexing dictionary…"* while it builds small sidecar files next to them — a `.qidx` for the word index, a `.sidx` when a `.syn` synonym file is present, and, for a `.dict.dz` with no plain `.dict`, a fully decompressed `.ddec`. The `.qidx`/`.sidx` build in a few seconds; the `.ddec` decompression is longer (tens of seconds for a large dictionary) and shows a real progress bar. Each sidecar is rebuilt independently, only when its own source changes. All sidecars can be deleted safely at any time — they will simply be rebuilt. (The `.ddec` is roughly the uncompressed dictionary size, so it uses more SD space than the `.dict.dz` alone; if space is tight, ship a plain `.dict` instead and no `.ddec` is created.)
 
 ### How Lookup Works
 

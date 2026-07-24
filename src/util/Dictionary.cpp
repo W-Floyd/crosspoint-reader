@@ -79,6 +79,7 @@ bool ifoDeclares64BitOffsets(const std::string& ifoPath) {
 bool Dictionary::open(const char* folderName) {
   basePath.clear();
   hasSyn = false;
+  hasDecompressedDict = false;
   std::string resolved;
   if (!DictionaryRegistry::resolveBasePath(folderName, resolved)) {
     LOG_ERR("DICT", "No dictionary found in folder '%s'", folderName ? folderName : "");
@@ -101,6 +102,9 @@ bool Dictionary::open(const char* folderName) {
   hasSyn = Storage.exists((resolved + ".syn").c_str());
 
   basePath = std::move(resolved);
+  // A plain .dict (hasPlainDict) is read directly; otherwise prefer a valid
+  // decompressed .ddec sidecar so lookups avoid the per-entry inflate window.
+  hasDecompressedDict = !hasPlainDict && decompressedSidecarValid();
   return true;
 }
 
@@ -119,13 +123,37 @@ bool Dictionary::sidecarIsStale(const std::string& sourcePath, const std::string
   return !header.valid || header.sourceFileSize != srcSize;
 }
 
+uint32_t Dictionary::dzUncompressedSize() {
+  HalFile dz;
+  if (!Storage.openFileForRead("DICT", basePath + ".dict.dz", dz)) return 0;
+  DictZip::Info info;
+  if (!DictZip::parse(dz, &info)) return 0;
+  return info.totalSize;
+}
+
+bool Dictionary::decompressedSidecarValid() {
+  HalFile ddec;
+  if (!Storage.openFileForRead("DICT", basePath + ".ddec", ddec)) return false;
+  const uint32_t expected = dzUncompressedSize();
+  return expected != 0 && static_cast<uint32_t>(ddec.fileSize()) == expected;
+}
+
 bool Dictionary::needsIndex() {
   if (!isOpen()) return false;
   if (sidecarIsStale(basePath + ".idx", basePath + ".qidx", QIDX_MAGIC)) return true;
-  return hasSyn && sidecarIsStale(basePath + ".syn", basePath + ".sidx", SIDX_MAGIC);
+  if (hasSyn && sidecarIsStale(basePath + ".syn", basePath + ".sidx", SIDX_MAGIC)) return true;
+  // A .dict.dz with no plain .dict needs its decompressed .ddec sidecar built so
+  // lookups avoid the fragmentation-prone per-entry inflate window. Only demand
+  // it when the .dz is parseable (expected != 0); otherwise there's nothing to
+  // build and the per-lookup dictzip fallback still applies.
+  if (!hasPlainDict) {
+    const uint32_t expected = dzUncompressedSize();
+    if (expected != 0 && !decompressedSidecarValid()) return true;
+  }
+  return false;
 }
 
-bool Dictionary::buildIndex(void (*yieldFn)(void*), void* ctx) {
+bool Dictionary::buildIndex(void (*yieldFn)(void*), void* ctx, ProgressFn progressFn) {
   if (!isOpen()) return false;
 
   // The .idx sidecar is mandatory — lookups binary-search it. Rebuild only when
@@ -145,6 +173,31 @@ bool Dictionary::buildIndex(void (*yieldFn)(void*), void* ctx) {
       !buildSidecar(basePath + ".syn", basePath + ".sidx", SIDX_MAGIC, 4, yieldFn, ctx)) {
     LOG_ERR("DICT", "Synonym index build failed; synonyms disabled for %s", basePath.c_str());
     hasSyn = false;
+  }
+
+  // For a compressed-only dictionary (.dict.dz, no plain .dict), decompress it
+  // once to a plain <stem>.ddec sidecar. Lookups then read definitions directly
+  // by uncompressed offset — no per-entry 32KB inflate window, which is what
+  // fails under heap fragmentation ("stopped finding words"). Best-effort: on
+  // failure the per-lookup dictzip fallback still works, and needsIndex() keeps
+  // it stale so the next open() retries.
+  if (!hasPlainDict && !hasDecompressedDict && dzUncompressedSize() != 0) {
+    const std::string ddecPath = basePath + ".ddec";
+    bool ddecOk = false;
+    {
+      HalFile out;
+      if (Storage.openFileForWrite("DICT", ddecPath, out)) {
+        ddecOk = DictZip::decompressToFile((basePath + ".dict.dz").c_str(), out, progressFn, ctx);
+        out.close();  // close before validate/remove of the same path
+      }
+    }
+    if (ddecOk && decompressedSidecarValid()) {
+      hasDecompressedDict = true;
+      LOG_INF("DICT", "Built decompressed dictionary sidecar for %s", basePath.c_str());
+    } else {
+      Storage.remove(ddecPath.c_str());
+      LOG_ERR("DICT", "Decompressed sidecar build failed; per-lookup dictzip fallback for %s", basePath.c_str());
+    }
   }
   return true;
 }
@@ -409,7 +462,15 @@ bool Dictionary::readDefinition(const DictLocation& location, std::string& out) 
   if (hasPlainDict) {
     path = basePath + ".dict";
     offset = location.offset;
+  } else if (hasDecompressedDict) {
+    // The .ddec sidecar mirrors the uncompressed .dict, so the .idx offset
+    // indexes it directly — no per-entry inflate, no 32KB window.
+    path = basePath + ".ddec";
+    offset = location.offset;
   } else {
+    // Fallback: inflate just this entry from the .dz into a temp file. This
+    // needs a 32KB inflate window and so can fail under heap fragmentation —
+    // exactly why the .ddec sidecar (built in buildIndex) is preferred.
     HalFile tmp = Storage.open(DICT_TMP_FILE, O_WRITE | O_CREAT | O_TRUNC);
     if (!tmp) {
       LOG_ERR("DICT", "Failed to open %s", DICT_TMP_FILE);

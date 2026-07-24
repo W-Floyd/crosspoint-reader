@@ -35,11 +35,16 @@ class Dictionary {
   // so the UI can show an "Indexing…" message for the slow first pass.
   bool needsIndex();
 
-  // One streaming pass over .idx writing the .qidx sidecar, plus a pass over
-  // .syn writing the .sidx sidecar when a synonym file is present. yieldFn
-  // (optional) is called every ~64KB consumed to feed the watchdog / repaint
-  // the UI.
-  bool buildIndex(void (*yieldFn)(void*) = nullptr, void* ctx = nullptr);
+  // Progress callback for the long build phases: (ctx, bytesDone, bytesTotal).
+  using ProgressFn = void (*)(void* ctx, uint32_t done, uint32_t total);
+
+  // Build the sidecars: the .qidx over .idx, the .sidx over .syn (if present),
+  // and — for a compressed .dict.dz with no plain .dict — a fully decompressed
+  // <stem>.ddec so lookups read definitions directly (no per-entry 32KB inflate
+  // window, which fails under heap fragmentation). yieldFn (optional) is called
+  // every ~64KB during the index scan to feed the watchdog; progressFn
+  // (optional) reports the .ddec decompression for a real progress bar.
+  bool buildIndex(void (*yieldFn)(void*) = nullptr, void* ctx = nullptr, ProgressFn progressFn = nullptr);
 
   // Clean the word, look it up, and on a miss retry mini stem variants
   // (-'s/-s/-es/-ies/-ed/-ing). On a hit fills the definition text (capped at
@@ -74,6 +79,13 @@ class Dictionary {
   // buildIndex() so each sidecar is rebuilt only when actually stale.
   bool sidecarIsStale(const std::string& sourcePath, const std::string& sidecarPath, uint32_t magic);
 
+  // Uncompressed size the .dict.dz declares (gzip ISIZE), or 0 if there is no
+  // parseable .dict.dz. Used to size/validate the decompressed .ddec sidecar.
+  uint32_t dzUncompressedSize();
+  // True when the .ddec decompressed sidecar exists and matches the .dz's
+  // uncompressed size (so lookups can read it directly).
+  bool decompressedSidecarValid();
+
   bool readDefinition(const DictLocation& location, std::string& out);
   static void stemVariants(const std::string& word, std::vector<std::string>& out);
 
@@ -84,7 +96,8 @@ class Dictionary {
 
   std::string basePath;  // "/dictionaries/<folder>/<stem>", empty when not open
   bool hasPlainDict = false;
-  bool hasSyn = false;  // a <stem>.syn synonym index exists next to the .idx
+  bool hasSyn = false;             // a <stem>.syn synonym index exists next to the .idx
+  bool hasDecompressedDict = false;  // a valid <stem>.ddec (decompressed .dict.dz) exists
 
   // Shared scan buffer: lookups are single-threaded and this avoids a
   // 256-byte array on the stack of every locate() call.

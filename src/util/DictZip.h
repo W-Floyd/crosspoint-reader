@@ -23,4 +23,13 @@ bool parse(HalFile& file, Info* info);
 // Decompress the uncompressed byte range [offset, offset+size) into outFile.
 bool extractEntry(const char* path, uint32_t offset, uint32_t size, HalFile& outFile);
 
+// Decompress the ENTIRE .dz to outFile (its full uncompressed .dict content),
+// so callers can read definitions directly by uncompressed offset without a
+// per-entry inflate. Uses ONE reused 32KB window across all chunks and writes
+// in large blocks. progressFn (optional) is called with (bytesWritten,
+// totalSize) as it streams, for a real progress bar. Returns true only if the
+// full uncompressed size was written.
+bool decompressToFile(const char* path, HalFile& outFile, void (*progressFn)(void*, uint32_t, uint32_t) = nullptr,
+                      void* ctx = nullptr);
+
 }  // namespace DictZip

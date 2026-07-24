@@ -177,4 +177,65 @@ bool extractEntry(const char* path, uint32_t offset, uint32_t size, HalFile& out
   return remaining == 0;
 }
 
+bool decompressToFile(const char* path, HalFile& outFile, void (*progressFn)(void*, uint32_t, uint32_t), void* ctx) {
+  HalFile file;
+  if (!Storage.openFileForRead("DICTZIP", path, file)) return false;
+
+  Info info;
+  if (!parse(file, &info)) return false;
+
+  const uint32_t chunkCount = static_cast<uint32_t>(info.chunkOffsets.size() - 1);
+  if (chunkCount == 0) return false;
+
+  // One reusable compressed-input buffer sized to the largest chunk (bounded by
+  // chunkLength, so < ~64KB), plus one reusable output buffer. Allocated once.
+  uint32_t maxComp = 0;
+  for (uint32_t c = 0; c < chunkCount; c++) {
+    const uint32_t cs = info.chunkOffsets[c + 1] - info.chunkOffsets[c];
+    if (cs > maxComp) maxComp = cs;
+  }
+  constexpr size_t OUT_BATCH = 4096;  // large writes so 50MB+ isn't 512B at a time
+  auto comp = makeUniqueNoThrow<uint8_t[]>(maxComp);
+  auto outBuf = makeUniqueNoThrow<uint8_t[]>(OUT_BATCH);
+  if (!comp || !outBuf) return false;
+
+  // Single 32KB inflate window reused across every (independent) chunk. This is
+  // the one large contiguous allocation; it happens once here at index-build
+  // time, not per lookup.
+  InflateReader reader;
+  if (!reader.init(true)) return false;
+
+  uint32_t written = 0;
+  uint32_t sinceProgress = 0;
+  for (uint32_t chunk = 0; chunk < chunkCount; chunk++) {
+    uint32_t chunkOutSize = info.chunkLength;
+    if (chunk == chunkCount - 1) chunkOutSize = info.totalSize - chunk * info.chunkLength;
+    if (chunkOutSize == 0 || chunkOutSize > info.chunkLength) chunkOutSize = info.chunkLength;
+
+    const uint32_t compOffset = info.dataOffset + info.chunkOffsets[chunk];
+    const uint32_t compSize = info.chunkOffsets[chunk + 1] - info.chunkOffsets[chunk];
+    if (!file.seekSet(compOffset)) return false;
+    if (file.read(comp.get(), static_cast<int>(compSize)) != static_cast<int>(compSize)) return false;
+
+    reader.reset();  // re-arm for this chunk, reusing the window
+    reader.setSource(comp.get(), compSize);
+
+    uint32_t rem = chunkOutSize;
+    while (rem > 0) {
+      const uint32_t batch = rem < OUT_BATCH ? rem : static_cast<uint32_t>(OUT_BATCH);
+      if (!reader.read(outBuf.get(), batch)) return false;
+      if (outFile.write(outBuf.get(), batch) != static_cast<int>(batch)) return false;
+      rem -= batch;
+      written += batch;
+      sinceProgress += batch;
+      if (progressFn && sinceProgress >= 256 * 1024) {
+        progressFn(ctx, written, info.totalSize);
+        sinceProgress = 0;
+      }
+    }
+  }
+  if (progressFn) progressFn(ctx, written, info.totalSize);
+  return written == info.totalSize;
+}
+
 }  // namespace DictZip

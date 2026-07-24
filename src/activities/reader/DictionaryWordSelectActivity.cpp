@@ -15,6 +15,7 @@
 #include "CrossPointSettings.h"
 #include "DictionaryDefinitionActivity.h"
 #include "components/UITheme.h"
+#include "fontIds.h"
 
 namespace {
 
@@ -38,6 +39,12 @@ bool isSelectableToken(const char* text) {
 }
 
 void indexBuildYield(void*) { vTaskDelay(1); }
+
+// C trampoline: buildIndex reports decompression progress here; forward to the
+// activity so it can draw the progress bar.
+void indexBuildProgress(void* ctx, uint32_t done, uint32_t total) {
+  static_cast<DictionaryWordSelectActivity*>(ctx)->onIndexProgress(done, total);
+}
 
 }  // namespace
 
@@ -161,7 +168,7 @@ void DictionaryWordSelectActivity::performLookup() {
   requestUpdateAndWait();  // paint the page + busy popup before blocking on SD
 
   bool ok = dictOpenOk;
-  if (ok && indexing) ok = dict.buildIndex(&indexBuildYield);
+  if (ok && indexing) ok = dict.buildIndex(&indexBuildYield, this, &indexBuildProgress);
 
   std::string definition;
   std::string headword;
@@ -187,6 +194,29 @@ void DictionaryWordSelectActivity::performLookup() {
   popupMsg = ok ? StrId::STR_DICT_NOT_FOUND : StrId::STR_DICT_ERROR;
   popupTime = millis();
   requestUpdate();
+}
+
+void DictionaryWordSelectActivity::onIndexProgress(uint32_t done, uint32_t total) {
+  vTaskDelay(1);  // feed the watchdog during the long decompress pass
+  const unsigned long now = millis();
+  // Throttle: e-ink refresh is ~1s, so repaint at most ~every 700ms (always on
+  // completion). Plenty of steps for a ~30-60s one-time build.
+  if (done < total && now - lastProgressDrawMs < 700) return;
+  lastProgressDrawMs = now;
+
+  const int w = renderer.getScreenWidth();
+  const int h = renderer.getScreenHeight();
+  const int panelW = (w * 3) / 4;
+  const int panelH = 96;
+  const int panelX = (w - panelW) / 2;
+  const int panelY = (h - panelH) / 2;
+  renderer.fillRect(panelX, panelY, panelW, panelH, false);  // white panel over the page
+  renderer.drawRect(panelX, panelY, panelW, panelH, true);   // border
+  renderer.drawCenteredText(UI_12_FONT_ID, panelY + 30, I18N.get(StrId::STR_DICT_INDEXING));
+  constexpr int barMargin = 24;
+  GUI.drawProgressBar(renderer, Rect{panelX + barMargin, panelY + 52, panelW - 2 * barMargin, 20}, done, total);
+  renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+  snapshotIdx = -1;  // page overdrawn; next render must be full
 }
 
 void DictionaryWordSelectActivity::loop() {

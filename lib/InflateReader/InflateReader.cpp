@@ -34,6 +34,8 @@ void InflateReader::deinit() {
   memset(&decomp, 0, sizeof(decomp));
 }
 
+void InflateReader::reset() { uzlib_uncompress_init(&decomp, ringBuffer, ringBuffer ? INFLATE_DICT_SIZE : 0); }
+
 void InflateReader::setSource(const uint8_t* src, size_t len) {
   decomp.source = src;
   decomp.source_limit = src + len;

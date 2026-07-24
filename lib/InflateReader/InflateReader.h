@@ -57,6 +57,11 @@ class InflateReader {
   // Release the ring buffer and reset internal state.
   void deinit();
 
+  // Re-arm for a new independent deflate stream, reusing the already-allocated
+  // ring buffer (no malloc/free). Cheap per-chunk reset when decompressing many
+  // independent streams (e.g. dictzip chunks) with one reader and one window.
+  void reset();
+
   // Set the entire compressed input as a contiguous memory buffer.
   // Used in one-shot mode; not needed when a read callback is set.
   void setSource(const uint8_t* src, size_t len);
