@@ -39,9 +39,22 @@ pio run -e default -t upload      # default env defines INPUT_INJECTION
 ## Run
 
 ```bash
-pip install pyserial
-python3 test/device/drive_dictionary.py --port /dev/tty.usbmodemXXXX --iters 500 --csv heap.csv
+python3 -m venv test/device/.venv && test/device/.venv/bin/pip install pyserial
+cd test/device
+
+# See ports / verify the link before a long run (auto-detects the port if omitted):
+./.venv/bin/python drive_dictionary.py --list-ports
+./.venv/bin/python drive_dictionary.py --selftest        # expects CMD_OK round-trip
+
+# Drive the soak:
+./.venv/bin/python drive_dictionary.py --iters 500 --csv heap.csv
 ```
+
+`--port` is optional — if omitted it auto-detects the single USB-serial device
+(macOS `cu.usbmodem*`, Linux `ttyACM*`/`ttyUSB*`), and errors if there are zero
+or several. `--selftest` fires one `CMD:TAP:CONFIRM` and confirms the firmware
+replies `CMD_OK`, so you know the dev build + link are good before committing to
+a 500-cycle run.
 
 It loops: hold Confirm (open word-select) → tap Confirm (look up) → tap Back →
 tap Right (next word), turning the page every few cycles. Each lookup prints

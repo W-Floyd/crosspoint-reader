@@ -24,10 +24,66 @@ import time
 
 try:
     import serial  # pyserial
+    from serial.tools import list_ports
 except ImportError:
     sys.exit("pyserial not installed. Run: pip install pyserial")
 
 LOOKUP_RE = re.compile(rb"lookup '([^']*)': ok=(\d) found=(\d) heapFree=(\d+) largestBlock=(\d+)")
+
+# USB-serial device-name hints for auto-detection (macOS cu.*, Linux ttyACM/USB).
+PORT_HINTS = ("usbmodem", "usbserial", "wchusbserial", "ttyACM", "ttyUSB")
+
+
+def list_serial_ports():
+    return list(list_ports.comports())
+
+
+def print_ports():
+    ports = list_serial_ports()
+    if not ports:
+        print("No serial ports found.")
+        return
+    print("Available serial ports:")
+    for p in ports:
+        print(f"  {p.device:<28} {p.description or ''}")
+
+
+def autodetect_port():
+    """Return the single likely device port, or None if 0 / ambiguous."""
+    candidates = [p.device for p in list_serial_ports()
+                  if any(h in p.device for h in PORT_HINTS) and "Bluetooth" not in p.device]
+    if len(candidates) == 1:
+        return candidates[0]
+    if not candidates:
+        print("Auto-detect: no likely USB-serial device found.")
+    else:
+        print(f"Auto-detect: ambiguous ({', '.join(candidates)}); pass --port to choose.")
+    return None
+
+
+def selftest(ser):
+    """Fire one CMD:TAP and confirm the firmware's CMD_OK round-trip."""
+    print("Self-test: sending CMD:TAP:CONFIRM ...")
+    ser.reset_input_buffer()
+    send(ser, "TAP:CONFIRM")
+    end = time.time() + 3.0
+    while time.time() < end:
+        line = ser.readline()
+        if not line:
+            continue
+        text = line.decode(errors="replace").strip()
+        if text:
+            print(f"  <- {text}")
+        if b"CMD_OK" in line:
+            print("Self-test PASSED: injection is live (dev build with INPUT_INJECTION).")
+            return True
+        if b"CMD_ERR" in line:
+            print("Self-test FAILED: firmware rejected the button name.")
+            return False
+    print("Self-test FAILED: no CMD_OK within 3s.\n"
+          "  - Is the device flashed with the `default` env (-DINPUT_INJECTION=1)?\n"
+          "  - Right --port? (try --list-ports)")
+    return False
 
 
 def send(ser, cmd):
@@ -58,7 +114,9 @@ def drain(ser, seconds, rows, state):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--port", required=True, help="serial device, e.g. /dev/tty.usbmodem1101")
+    ap.add_argument("--port", help="serial device (auto-detected if omitted)")
+    ap.add_argument("--list-ports", action="store_true", help="list serial ports and exit")
+    ap.add_argument("--selftest", action="store_true", help="verify the CMD_OK round-trip and exit")
     ap.add_argument("--baud", type=int, default=115200)
     ap.add_argument("--iters", type=int, default=500, help="lookup cycles to drive")
     ap.add_argument("--hold-ms", type=int, default=550, help="Confirm hold to open word-select")
@@ -67,8 +125,24 @@ def main():
     ap.add_argument("--csv", default="dict_heap.csv")
     args = ap.parse_args()
 
-    ser = serial.Serial(args.port, args.baud, timeout=0.2)
+    if args.list_ports:
+        print_ports()
+        return
+
+    port = args.port or autodetect_port()
+    if not port:
+        print("No port. Use --list-ports to see options, then pass --port.")
+        sys.exit(2)
+
+    ser = serial.Serial(port, args.baud, timeout=0.2)
     time.sleep(2.0)  # let the port settle
+    print(f"Connected: {port} @ {args.baud}")
+
+    if args.selftest:
+        ok = selftest(ser)
+        ser.close()
+        sys.exit(0 if ok else 1)
+
     rows, state = [], {"n": 0, "misses": 0}
     print("Driving dictionary lookups. Ctrl-C to stop.\n")
 
