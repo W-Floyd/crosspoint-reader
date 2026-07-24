@@ -1,0 +1,8 @@
+# Build output + fuzzing artifacts — sources only are tracked.
+dictionary_fuzz
+dictionary_fuzz.dSYM/
+corpus/
+crash-*
+leak-*
+timeout-*
+oom-*
