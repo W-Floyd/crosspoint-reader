@@ -5,6 +5,8 @@
 #include <SecureHttpClient.h>
 #include <base64.h>
 
+#include <algorithm>
+#include <cstdio>
 #include <string>
 
 #include "KOReaderCredentialStore.h"
@@ -50,6 +52,11 @@ constexpr uint32_t MIN_BLOCK_FOR_TLS = 20000;
 // KOSync scheme; Basic auth is added for Calibre-Web-Automated compatibility.
 void applyAuthHeaders(freeink::SecureHttpClient& http) {
   http.addHeader("Accept", "application/vnd.koreader.v1+json");
+  // SecureHttpClient sends no Accept-Encoding and nothing decodes
+  // Content-Encoding, so a proxy that volunteers gzip would hand
+  // deserializeJson() raw deflate bytes. Refuse compression explicitly rather
+  // than relying on the origin not to offer it unasked.
+  http.addHeader("Accept-Encoding", "identity");
   http.addHeader("x-auth-user", KOREADER_STORE.getUsername());
   http.addHeader("x-auth-key", KOREADER_STORE.getMd5Password());
   const std::string credentials = KOREADER_STORE.getUsername() + ":" + KOREADER_STORE.getPassword();
@@ -167,14 +174,38 @@ KOReaderSyncClient::Error KOReaderSyncClient::getProgress(const std::string& doc
   }
 
   if (httpCode == 200) {
+    // Held by reference across the parse: getString() returns a reference into
+    // the client's own body buffer, valid until end() below. Captured before
+    // the parse so the diagnostics can report what actually arrived.
+    const std::string& raw = http.getString();
+    const bool complete = http.responseComplete();
+    const std::string contentType = http.getHeader("content-type");
+    const std::string contentEncoding = http.getHeader("content-encoding");
+
     JsonDocument doc;
-    const DeserializationError error = deserializeJson(doc, http.getString().c_str());
-    http.end();
+    const DeserializationError error = deserializeJson(doc, raw.c_str());
 
     if (error) {
-      LOG_ERR("KOSync", "JSON parse failed: %s", error.c_str());
+      // A proxy in front of a public kosync endpoint can answer 200 with an
+      // HTML login/challenge page or a compressed body; the ArduinoJson code
+      // alone cannot tell those apart, so report the framing and a bounded
+      // prefix of the payload. LOG_ERR formats into a fixed buffer, hence the
+      // explicit precision rather than dumping a multi-KB page.
+      LOG_ERR("KOSync", "JSON parse failed: %s (len=%u complete=%d type=%s enc=%s heap=%u)", error.c_str(),
+              (unsigned)raw.size(), (int)complete, contentType.empty() ? "(none)" : contentType.c_str(),
+              contentEncoding.empty() ? "(none)" : contentEncoding.c_str(), (unsigned)ESP.getFreeHeap());
+      // Hex of the leading bytes: a compressed body starts 1f 8b and contains
+      // NULs, so the %s dump below would stop after a couple of characters and
+      // look like an empty response rather than gzip.
+      char hex[25] = {0};
+      const size_t hexBytes = std::min<size_t>(raw.size(), 8);
+      for (size_t i = 0; i < hexBytes; ++i) snprintf(hex + i * 3, 4, "%02x ", (uint8_t)raw[i]);
+      LOG_ERR("KOSync", "Head: %s", hex);
+      LOG_ERR("KOSync", "Body[0..191]: %.192s", raw.c_str());
+      http.end();
       return JSON_ERROR;
     }
+    http.end();
 
     outProgress.document = documentHash;
     outProgress.progress = doc["progress"].as<std::string>();
